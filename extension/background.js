@@ -3,13 +3,13 @@ const SOURCE_TYPE = "tab";
 const MEASUREMENT = "behavior_events";
 
 const FLUSH_INTERVAL_MS = 3000;
-const HEARTBEAT_INTERVAL_MS = 30000;
-const IDLE_THRESHOLD_MS = 5 * 60 * 1000;
+const IDLE_TIMEOUT_MS = 5000;
+const IDLE_CHECK_INTERVAL_MS = 1000;
 const MAX_BATCH_SIZE = 100;
 const MAX_BUFFER_EVENTS = 3000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
-const INTEGER_FIELDS = new Set(["scroll_delta"]);
+const NOISE_MIN_DURATION_SECONDS = 0.5;
 
 const REQUIRED_ENV_KEYS = [
   "INFLUX_URL",
@@ -18,12 +18,15 @@ const REQUIRED_ENV_KEYS = [
   "INFLUX_BUCKET"
 ];
 
+const INTEGER_FIELDS = new Set(["scroll_delta"]);
+
 const eventBuffer = [];
 const activeTabByWindow = new Map();
 
 let influxConfig = null;
 let flushInProgress = false;
 let lastFlushMs = Date.now();
+let focusedWindowId = chrome.windows.WINDOW_ID_NONE;
 
 const configLoadPromise = loadInfluxConfig();
 
@@ -91,15 +94,26 @@ async function loadInfluxConfig() {
   );
 }
 
-function extractDomain(url) {
-  if (!url) {
-    return "unknown";
+// Domain-only tracking is insufficient because the URL path/query carries
+// semantic task context (issues page vs search page vs repo page).
+function parseUrlParts(rawUrl) {
+  if (!rawUrl) {
+    return { domain: "unknown", path: "/", full_url: "" };
   }
+
   try {
-    const parsed = new URL(url);
-    return parsed.hostname || "unknown";
+    const parsed = new URL(rawUrl);
+    return {
+      domain: parsed.hostname || "unknown",
+      path: `${parsed.pathname || "/"}${parsed.search || ""}`,
+      full_url: parsed.href
+    };
   } catch (_error) {
-    return "unknown";
+    return {
+      domain: "unknown",
+      path: "/",
+      full_url: String(rawUrl)
+    };
   }
 }
 
@@ -119,10 +133,15 @@ function escapeFieldKey(value) {
   return value.replace(/\\/g, "\\\\").replace(/,/g, "\\,").replace(/ /g, "\\ ");
 }
 
+function escapeFieldString(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function formatFieldValue(key, value) {
   if (typeof value === "boolean") {
     return value ? "true" : "false";
   }
+
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
       return "0";
@@ -133,54 +152,117 @@ function formatFieldValue(key, value) {
     return `${Number(value)}`;
   }
 
-  const text = String(value)
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"');
-  return `"${text}"`;
+  return `"${escapeFieldString(value)}"`;
 }
 
-function createEvent(domain, eventType, metrics = {}) {
-  const safeDomain = domain || "unknown";
-  const safeMetrics = {
-    duration: Number(metrics.duration || 0),
-    scroll_delta: Number(metrics.scroll_delta || 0),
-    scroll_depth: Number(metrics.scroll_depth || 0)
+function createCurrentEvent(url, nowMs) {
+  const parts = parseUrlParts(url);
+  return {
+    start_time: nowMs,
+    domain: parts.domain,
+    path: parts.path,
+    full_url: parts.full_url,
+    scroll_total: 0,
+    last_scroll_depth: 0,
+    last_activity_ms: nowMs,
+    active_accumulated_ms: 0,
+    active_started_ms: null
   };
+}
+
+function isStateActive(state) {
+  return Boolean(state?.window_focused && state?.tab_visible);
+}
+
+function syncActiveDurationClock(state, nowMs) {
+  if (!state?.currentEvent) {
+    return;
+  }
+
+  const isActive = isStateActive(state);
+  const activeStarted = state.currentEvent.active_started_ms;
+  if (isActive && activeStarted == null) {
+    state.currentEvent.active_started_ms = nowMs;
+    return;
+  }
+
+  if (!isActive && activeStarted != null) {
+    state.currentEvent.active_accumulated_ms += nowMs - activeStarted;
+    state.currentEvent.active_started_ms = null;
+  }
+}
+
+function createStateFromTab(
+  tab,
+  nowMs,
+  fallbackUrl = "",
+  windowFocused = false,
+  tabVisible = true
+) {
+  const resolvedUrl = tab?.url || fallbackUrl || "";
+  const currentEvent = createCurrentEvent(resolvedUrl, nowMs);
+  if (windowFocused && tabVisible) {
+    currentEvent.active_started_ms = nowMs;
+  }
+  return {
+    tab_id: tab?.id ?? -1,
+    window_id: tab?.windowId ?? chrome.windows.WINDOW_ID_NONE,
+    title: tab?.title || "",
+    window_focused: windowFocused,
+    tab_visible: tabVisible,
+    currentEvent
+  };
+}
+
+function createEventLinePayload(segment, eventType, durationSeconds) {
+  const hasScroll = Math.trunc(Number(segment.scroll_total || 0)) !== 0;
+  const normalizedEventType = hasScroll ? "scroll" : eventType;
+
+  const fields = {
+    duration: Number(durationSeconds || 0),
+    path: segment.path || "/",
+    full_url: segment.full_url || ""
+  };
+
+  // Scroll fields are included only when real scroll happened.
+  // This avoids polluting Influx with zero-value scroll metrics.
+  if (hasScroll) {
+    fields.scroll_delta = Math.trunc(Number(segment.scroll_total || 0));
+    const depth = Number(segment.last_scroll_depth || 0);
+    if (depth > 0) {
+      fields.scroll_depth = depth;
+    }
+  }
 
   return {
     timestamp_ns: nowNs(),
     tags: {
       user_id: USER_ID,
       source_type: SOURCE_TYPE,
-      domain: safeDomain,
-      event_type: eventType
-    },
-    fields: safeMetrics
+      domain: segment.domain || "unknown",
+      event_type: normalizedEventType
+    }
+    ,
+    fields
   };
 }
 
-function logEventToConsole(event, details = {}) {
-  const eventType = event?.tags?.event_type || "unknown";
-  const domain = event?.tags?.domain || "unknown";
-  console.info("[Behavior Browser Agent]", {
-    event_type: eventType,
-    domain,
-    tab_id: details.tab_id ?? null,
-    window_id: details.window_id ?? null,
-    tab_title: details.tab_title ?? "",
-    tab_url: details.tab_url ?? "",
-    duration: Number(event?.fields?.duration || 0),
-    scroll_delta: Number(event?.fields?.scroll_delta || 0),
-    scroll_depth: Number(event?.fields?.scroll_depth || 0)
-  });
+function shouldDropEvent(event) {
+  const duration = Number(event?.fields?.duration || 0);
+  const scrollDelta = Number(event?.fields?.scroll_delta || 0);
+  if (event?.tags?.event_type === "switch") {
+    return false;
+  }
+  return duration < NOISE_MIN_DURATION_SECONDS && scrollDelta === 0;
 }
 
-function toLineProtocol(event) {
+// One logical event must produce one line protocol row. Splitting duration,
+// scroll and URL fields into separate writes fragments the event graph.
+function buildLineProtocol(event) {
   const measurement = escapeMeasurement(MEASUREMENT);
   const tags = Object.entries(event.tags)
     .map(([key, value]) => `${escapeTag(key)}=${escapeTag(String(value))}`)
     .join(",");
-
   const fields = Object.entries(event.fields)
     .map(([key, value]) => `${escapeFieldKey(key)}=${formatFieldValue(key, value)}`)
     .join(",");
@@ -188,17 +270,130 @@ function toLineProtocol(event) {
   return `${measurement},${tags} ${fields} ${event.timestamp_ns}`;
 }
 
-function enqueueEvent(event, details = {}) {
+function logEventToConsole(event, state) {
+  console.info("[Behavior Browser Agent]", {
+    event_type: event.tags.event_type,
+    domain: event.tags.domain,
+    path: event.fields.path,
+    full_url: event.fields.full_url,
+    tab_id: state?.tab_id ?? null,
+    window_id: state?.window_id ?? null,
+    tab_title: state?.title || "",
+    duration: Number(event.fields.duration || 0),
+    scroll_delta: Number(event.fields.scroll_delta || 0),
+    scroll_depth: Number(event.fields.scroll_depth || 0)
+  });
+}
+
+function enqueueEvent(event, state) {
+  if (shouldDropEvent(event)) {
+    return false;
+  }
+
   eventBuffer.push(event);
-  logEventToConsole(event, details);
+  logEventToConsole(event, state);
 
   if (eventBuffer.length > MAX_BUFFER_EVENTS) {
     eventBuffer.splice(0, eventBuffer.length - MAX_BUFFER_EVENTS);
   }
 
-  const elapsed = Date.now() - lastFlushMs;
-  if (eventBuffer.length >= MAX_BATCH_SIZE || elapsed >= FLUSH_INTERVAL_MS) {
+  const elapsedSinceFlush = Date.now() - lastFlushMs;
+  if (eventBuffer.length >= MAX_BATCH_SIZE || elapsedSinceFlush >= FLUSH_INTERVAL_MS) {
     void flushBuffer();
+  }
+  return true;
+}
+
+function flushCurrentEvent(state, eventType, nowMs) {
+  if (!state?.currentEvent) {
+    return;
+  }
+
+  syncActiveDurationClock(state, nowMs);
+  let activeMs = state.currentEvent.active_accumulated_ms;
+  if (isStateActive(state) && state.currentEvent.active_started_ms != null) {
+    activeMs += nowMs - state.currentEvent.active_started_ms;
+  }
+  const durationSeconds = Math.max(activeMs / 1000, 0);
+  const event = createEventLinePayload(state.currentEvent, eventType, durationSeconds);
+  enqueueEvent(event, state);
+}
+
+function rotateSegmentToUrl(state, url, nowMs) {
+  if (!state) {
+    return;
+  }
+
+  if (!state.currentEvent) {
+    state.currentEvent = createCurrentEvent(url, nowMs);
+    return;
+  }
+
+  const nextParts = parseUrlParts(url);
+  if (nextParts.full_url === state.currentEvent.full_url) {
+    return;
+  }
+
+  flushCurrentEvent(state, "switch", nowMs);
+  state.currentEvent = {
+    ...createCurrentEvent(url, nowMs),
+    last_scroll_depth: 0,
+    active_started_ms: isStateActive(state) ? nowMs : null
+  };
+}
+
+function ensureStateForSenderTab(tab, nowMs, fallbackUrl = "") {
+  if (!tab || tab.id == null || tab.windowId === chrome.windows.WINDOW_ID_NONE) {
+    return null;
+  }
+
+  const existing = activeTabByWindow.get(tab.windowId);
+  if (!existing) {
+    const created = createStateFromTab(
+      tab,
+      nowMs,
+      fallbackUrl,
+      tab.windowId === focusedWindowId,
+      true
+    );
+    activeTabByWindow.set(tab.windowId, created);
+    return created;
+  }
+
+  if (existing.tab_id !== tab.id) {
+    return null;
+  }
+
+  existing.title = tab.title || existing.title;
+  const resolvedUrl = tab.url || fallbackUrl || "";
+  if (resolvedUrl) {
+    rotateSegmentToUrl(existing, resolvedUrl, nowMs);
+  }
+  syncActiveDurationClock(existing, nowMs);
+  activeTabByWindow.set(tab.windowId, existing);
+  return existing;
+}
+
+function applyFocusedWindow(windowId) {
+  focusedWindowId = windowId;
+  const nowMs = Date.now();
+  for (const [key, state] of activeTabByWindow.entries()) {
+    if (!state) {
+      continue;
+    }
+    state.window_focused = state.window_id === windowId;
+    syncActiveDurationClock(state, nowMs);
+    activeTabByWindow.set(key, state);
+  }
+}
+
+async function initializeFocusedWindow() {
+  try {
+    const windows = await chrome.windows.getAll();
+    const focused = windows.find((item) => item.focused);
+    applyFocusedWindow(focused ? focused.id : chrome.windows.WINDOW_ID_NONE);
+  } catch (_error) {
+    applyFocusedWindow(chrome.windows.WINDOW_ID_NONE);
   }
 }
 
@@ -239,8 +434,8 @@ async function writePayload(payload) {
     }
 
     if (attempt < MAX_RETRIES) {
-      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 
@@ -253,7 +448,6 @@ async function flushBuffer() {
   }
 
   flushInProgress = true;
-
   try {
     await configLoadPromise;
     if (!influxConfig) {
@@ -265,7 +459,7 @@ async function flushBuffer() {
       return;
     }
 
-    const payload = batch.map(toLineProtocol).join("\n");
+    const payload = batch.map(buildLineProtocol).join("\n");
     const ok = await writePayload(payload);
     if (!ok) {
       eventBuffer.unshift(...batch);
@@ -280,161 +474,81 @@ async function flushBuffer() {
   }
 }
 
-function emitDurationHeartbeat() {
-  const now = Date.now();
-
+function checkIdleSegments() {
+  const nowMs = Date.now();
   for (const [windowId, state] of activeTabByWindow.entries()) {
-    if (!state) {
+    if (!state?.currentEvent) {
       continue;
     }
 
-    const elapsedSec = Math.max((now - state.started_at_ms) / 1000, 0);
-    if (elapsedSec < 1) {
-      continue;
+    const inactiveMs = nowMs - state.currentEvent.last_activity_ms;
+    if (inactiveMs >= IDLE_TIMEOUT_MS) {
+      flushCurrentEvent(state, "idle", nowMs);
+      state.currentEvent = null;
+      activeTabByWindow.set(windowId, state);
     }
-    const inactiveMs = now - (state.last_activity_ms || state.started_at_ms);
-    const eventType = inactiveMs >= IDLE_THRESHOLD_MS ? "idle" : "focus";
-
-    enqueueEvent(
-      createEvent(state.domain, eventType, {
-        duration: elapsedSec
-      }),
-      {
-        tab_id: state.tab_id,
-        window_id: windowId,
-        tab_title: state.title || "",
-        tab_url: state.url || ""
-      }
-    );
-
-    state.started_at_ms = now;
-    activeTabByWindow.set(windowId, state);
   }
 }
 
 async function bootstrapActiveTabs() {
   const tabs = await chrome.tabs.query({ active: true });
-  const now = Date.now();
+  const nowMs = Date.now();
   for (const tab of tabs) {
-    if (tab.windowId === chrome.windows.WINDOW_ID_NONE || tab.id == null) {
+    if (tab.id == null || tab.windowId === chrome.windows.WINDOW_ID_NONE) {
       continue;
     }
-    activeTabByWindow.set(tab.windowId, {
-      tab_id: tab.id,
-      domain: extractDomain(tab.url),
-      url: tab.url || "",
-      title: tab.title || "",
-      started_at_ms: now,
-      last_activity_ms: now
-    });
+    activeTabByWindow.set(
+      tab.windowId,
+      createStateFromTab(tab, nowMs, "", tab.windowId === focusedWindowId, true)
+    );
   }
 }
 
 async function handleTabActivated(activeInfo) {
   const tab = await chrome.tabs.get(activeInfo.tabId);
-  const now = Date.now();
-  const domain = extractDomain(tab.url);
+  const nowMs = Date.now();
+
   const previous = activeTabByWindow.get(activeInfo.windowId);
-
   if (previous && previous.tab_id !== activeInfo.tabId) {
-    const elapsedSec = Math.max((now - previous.started_at_ms) / 1000, 0);
-
-    enqueueEvent(
-      createEvent(previous.domain, "switch", {
-        duration: elapsedSec
-      }),
-      {
-        tab_id: previous.tab_id,
-        window_id: activeInfo.windowId,
-        tab_title: previous.title || "",
-        tab_url: previous.url || ""
-      }
-    );
+    flushCurrentEvent(previous, "switch", nowMs);
   }
 
-  activeTabByWindow.set(activeInfo.windowId, {
-    tab_id: activeInfo.tabId,
-    domain,
-    url: tab.url || "",
-    title: tab.title || "",
-    started_at_ms: now,
-    last_activity_ms: now
-  });
-
-  enqueueEvent(createEvent(domain, "focus", { duration: 0 }), {
-    tab_id: activeInfo.tabId,
-    window_id: activeInfo.windowId,
-    tab_title: tab.title || "",
-    tab_url: tab.url || ""
-  });
+  activeTabByWindow.set(activeInfo.windowId, createStateFromTab(tab, nowMs));
+  const created = activeTabByWindow.get(activeInfo.windowId);
+  if (created) {
+    created.window_focused = activeInfo.windowId === focusedWindowId;
+    created.tab_visible = true;
+    syncActiveDurationClock(created, nowMs);
+    activeTabByWindow.set(activeInfo.windowId, created);
+  }
 }
 
 function handleTabUpdated(tabId, changeInfo, tab) {
-  if (!tab.active || !changeInfo.url) {
+  if (!tab?.active) {
     return;
   }
 
-  const current = activeTabByWindow.get(tab.windowId);
-  if (!current || current.tab_id !== tabId) {
+  const state = activeTabByWindow.get(tab.windowId);
+  if (!state || state.tab_id !== tabId) {
     return;
   }
 
-  const newDomain = extractDomain(changeInfo.url);
-  if (newDomain === current.domain) {
-    return;
+  if (changeInfo.title) {
+    state.title = changeInfo.title;
   }
-
-  const now = Date.now();
-  const elapsedSec = Math.max((now - current.started_at_ms) / 1000, 0);
-
-  enqueueEvent(
-    createEvent(current.domain, "switch", {
-      duration: elapsedSec
-    }),
-    {
-      tab_id: tabId,
-      window_id: tab.windowId,
-      tab_title: current.title || "",
-      tab_url: current.url || ""
-    }
-  );
-
-  current.domain = newDomain;
-  current.url = tab.url || changeInfo.url || "";
-  current.title = tab.title || "";
-  current.started_at_ms = now;
-  current.last_activity_ms = now;
-  activeTabByWindow.set(tab.windowId, current);
-
-  enqueueEvent(createEvent(newDomain, "focus", { duration: 0 }), {
-    tab_id: tabId,
-    window_id: tab.windowId,
-    tab_title: current.title || "",
-    tab_url: current.url || ""
-  });
+  if (changeInfo.url) {
+    rotateSegmentToUrl(state, changeInfo.url, Date.now());
+  }
+  activeTabByWindow.set(tab.windowId, state);
 }
 
 function handleTabRemoved(tabId, removeInfo) {
-  const current = activeTabByWindow.get(removeInfo.windowId);
-  if (!current || current.tab_id !== tabId) {
+  const state = activeTabByWindow.get(removeInfo.windowId);
+  if (!state || state.tab_id !== tabId) {
     return;
   }
 
-  const now = Date.now();
-  const elapsedSec = Math.max((now - current.started_at_ms) / 1000, 0);
-
-  enqueueEvent(
-    createEvent(current.domain, "switch", {
-      duration: elapsedSec
-    }),
-    {
-      tab_id: tabId,
-      window_id: removeInfo.windowId,
-      tab_title: current.title || "",
-      tab_url: current.url || ""
-    }
-  );
-
+  flushCurrentEvent(state, "switch", Date.now());
   activeTabByWindow.delete(removeInfo.windowId);
 }
 
@@ -450,42 +564,40 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   handleTabRemoved(tabId, removeInfo);
 });
 
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  applyFocusedWindow(windowId);
+});
+
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (!sender.tab || sender.tab.id == null) {
     return;
   }
 
-  const tabId = sender.tab.id;
-  const windowId = sender.tab.windowId;
-  const tabUrl = sender.tab.url || message?.url || "";
-  const tabTitle = sender.tab.title || "";
-  const domain = extractDomain(tabUrl);
-  const current = activeTabByWindow.get(windowId);
-  if (current && current.tab_id === tabId) {
-    current.url = tabUrl;
-    current.title = tabTitle;
-    activeTabByWindow.set(windowId, current);
+  const nowMs = Date.now();
+  const state = ensureStateForSenderTab(sender.tab, nowMs, message?.url || "");
+  if (!state) {
+    return;
+  }
+
+  if (!state.currentEvent) {
+    const resolvedUrl = sender.tab.url || message?.url || "";
+    state.currentEvent = createCurrentEvent(resolvedUrl, nowMs);
+    if (isStateActive(state)) {
+      state.currentEvent.active_started_ms = nowMs;
+    }
+  }
+
+  if (message?.type === "page_visibility") {
+    state.tab_visible = Boolean(message.visible);
+    syncActiveDurationClock(state, nowMs);
+    activeTabByWindow.set(sender.tab.windowId, state);
+    return;
   }
 
   if (message?.type === "page_interrupt") {
-    if (current && current.tab_id === tabId) {
-      const now = Date.now();
-      const elapsedSec = Math.max((now - current.started_at_ms) / 1000, 0);
-      current.last_activity_ms = now;
-      if (elapsedSec >= 1) {
-        enqueueEvent(
-          createEvent(current.domain, "focus", { duration: elapsedSec }),
-          {
-            tab_id: tabId,
-            window_id: windowId,
-            tab_title: tabTitle,
-            tab_url: tabUrl
-          }
-        );
-      }
-      current.started_at_ms = now;
-      activeTabByWindow.set(windowId, current);
-    }
+    state.currentEvent.last_activity_ms = nowMs;
+    syncActiveDurationClock(state, nowMs);
+    activeTabByWindow.set(sender.tab.windowId, state);
     return;
   }
 
@@ -493,25 +605,19 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     return;
   }
 
-  const scrollDelta = Number(message.scroll_delta || 0);
-  const scrollDepth = Number(message.scroll_depth || 0);
-  if (scrollDelta !== 0 || scrollDepth > 0) {
-    if (current && current.tab_id === tabId) {
-      current.last_activity_ms = Date.now();
-      activeTabByWindow.set(windowId, current);
-    }
-    enqueueEvent(
-      createEvent(domain, "scroll", {
-        scroll_delta: scrollDelta,
-        scroll_depth: scrollDepth
-      }),
-      {
-        tab_id: tabId,
-        window_id: windowId,
-        tab_title: tabTitle,
-        tab_url: tabUrl
-      }
+  // No write in scroll path: we aggregate into currentEvent and flush only on
+  // switch/url-change/idle timeout.
+  const scrollDelta = Math.trunc(Number(message.scroll_delta || 0));
+  if (scrollDelta !== 0) {
+    const scrollDepth = Number(message.scroll_depth || 0);
+    state.currentEvent.scroll_total += scrollDelta;
+    state.currentEvent.last_scroll_depth = Math.max(
+      state.currentEvent.last_scroll_depth,
+      scrollDepth
     );
+    state.currentEvent.last_activity_ms = nowMs;
+    syncActiveDurationClock(state, nowMs);
+    activeTabByWindow.set(sender.tab.windowId, state);
   }
 });
 
@@ -523,12 +629,17 @@ chrome.runtime.onStartup.addListener(() => {
   void bootstrapActiveTabs();
 });
 
-void bootstrapActiveTabs();
+async function initializeAgentState() {
+  await initializeFocusedWindow();
+  await bootstrapActiveTabs();
+}
+
+void initializeAgentState();
 
 setInterval(() => {
   void flushBuffer();
 }, FLUSH_INTERVAL_MS);
 
 setInterval(() => {
-  emitDurationHeartbeat();
-}, HEARTBEAT_INTERVAL_MS);
+  checkIdleSegments();
+}, IDLE_CHECK_INTERVAL_MS);

@@ -1,0 +1,135 @@
+/* ── Reset & base ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0f1117;
+  --surface:  #1a1d27;
+  --border:   #2a2d3a;
+  --accent:   #4ade80;
+  --accent2:  #60a5fa;
+  --danger:   #f87171;
+  --text:     #e2e8f0;
+  --muted:    #64748b;
+  --radius:   8px;
+}
+
+body {
+  width: 320px;
+  min-height: 220px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 'Inter', system-ui, sans-serif;
+  padding: 20px;
+  user-select: none;
+}
+
+/* ── Typography ────────────────────────────────────────────────────────────── */
+h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  color: var(--text);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+h1 .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  transition: background .3s;
+}
+h1 .dot.running   { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 2s infinite; }
+h1 .dot.hidden,
+h1 .dot.background,
+h1 .dot.idle      { background: #facc15; }
+h1 .dot.finished  { background: var(--muted); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .5; }
+}
+
+/* ── Form ───────────────────────────────────────────────────────────────────── */
+.form-group {
+  margin-bottom: 12px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+input[type="number"],
+input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color .2s;
+}
+
+input:focus {
+  border-color: var(--accent2);
+}
+
+input::-webkit-inner-spin-button { opacity: 0.5; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+.btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity .2s, transform .1s;
+  letter-spacing: .3px;
+}
+.btn:active { transform: scale(.98); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.btn-start { background: var(--accent);  color: #0f1117; }
+.btn-stop  { background: var(--danger);  color: #fff; }
+
+/* ── Status panel ────────────────────────────────────────────────────────────── */
+#status-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--muted);
+  display: none;
+}
+
+#status-panel.visible { display: block; }
+
+#status-panel .row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+#status-panel .row:last-child { margin-bottom: 0; }
+#status-panel .val { color: var(--text); font-weight: 500; }
+
+/* ── Error ───────────────────────────────────────────────────────────────────── */
+#error-msg {
+  font-size: 12px;
+  color: var(--danger);
+  margin-top: 8px;
+  display: none;
+}
+#error-msg.visible { display: block; }

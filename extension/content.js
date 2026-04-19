@@ -24,7 +24,7 @@
   }
 
   function hasPendingData() {
-    return pending.scroll_delta !== 0 || pending.scroll_depth > 0;
+    return pending.scroll_delta !== 0;
   }
 
   function resetPending() {
@@ -45,10 +45,7 @@
       scroll_depth: pending.scroll_depth
     };
 
-    chrome.runtime.sendMessage(payload, () => {
-      // Suppress errors when the extension is reloading.
-      void chrome.runtime.lastError;
-    });
+    safeSendMessage(payload);
     resetPending();
   }
 
@@ -63,7 +60,8 @@
     "scroll",
     () => {
       const currentY = window.scrollY;
-      pending.scroll_delta += currentY - lastScrollY;
+      const delta = currentY - lastScrollY;
+      pending.scroll_delta += delta;
       pending.scroll_depth = Math.max(pending.scroll_depth, computeScrollDepth());
       lastScrollY = currentY;
       scheduleFlush();
@@ -75,27 +73,55 @@
   // keep this content script focused on scroll-only behavior.
 
   document.addEventListener("visibilitychange", () => {
+    sendVisibilityState();
     if (document.hidden) {
       flushPending();
     }
   });
 
+  function canSendToRuntime() {
+    return Boolean(globalThis.chrome && chrome.runtime && chrome.runtime.id);
+  }
+
+  function safeSendMessage(payload) {
+    if (!canSendToRuntime()) {
+      return;
+    }
+
+    try {
+      chrome.runtime.sendMessage(payload, () => {
+        // Access guarded to avoid "Extension context invalidated" noise
+        // when the extension reloads while old content scripts are still alive.
+        if (chrome?.runtime?.lastError) {
+          return;
+        }
+      });
+    } catch (_error) {
+      // Extension context can be invalidated during reload/update/navigation.
+      // We intentionally ignore this to keep page-side script stable.
+    }
+  }
+
   function sendInterrupt(reason) {
-    chrome.runtime.sendMessage(
-      {
-        type: "page_interrupt",
-        reason,
-        url: window.location.href
-      },
-      () => {
-        void chrome.runtime.lastError;
-      }
-    );
+    safeSendMessage({
+      type: "page_interrupt",
+      reason,
+      url: window.location.href
+    });
+  }
+
+  function sendVisibilityState() {
+    safeSendMessage({
+      type: "page_visibility",
+      visible: !document.hidden,
+      url: window.location.href
+    });
   }
 
   document.addEventListener("copy", () => sendInterrupt("copy"), true);
   document.addEventListener("paste", () => sendInterrupt("paste"), true);
   document.addEventListener("cut", () => sendInterrupt("cut"), true);
 
+  sendVisibilityState();
   window.addEventListener("beforeunload", flushPending);
 })();

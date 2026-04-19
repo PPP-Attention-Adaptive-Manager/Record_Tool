@@ -1,0 +1,19 @@
+{
+  "name": "browser-agent-v2",
+  "version": "2.0.0",
+  "description": "Behavioral data collection extension for cognitive load research",
+  "private": true,
+  "scripts": {
+    "lint": "eslint src/",
+    "zip": "zip -r browser_agent_v2.zip manifest.json src/ icons/ --exclude '*.DS_Store'"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0"
+  },
+  "notes": {
+    "content-scripts": "Chrome does not support ES module imports in content_scripts without a bundler. src/content/content_script.js is self-contained. To use the modular sources (scroll_tracker.js, activity_tracker.js, stimulus_ui.js) directly, add webpack or Rollup with entries for content_script.js.",
+    "background": "src/background/service_worker.js uses native ES module imports (manifest type:module) — no bundler needed.",
+    "popup": "src/popup/popup.html uses <script type=module> — no bundler needed.",
+    "questionnaire": "src/questionnaire/questionnaire.html uses <script type=module> — no bundler needed."
+  }
+}

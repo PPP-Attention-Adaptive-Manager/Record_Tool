@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Cognitive Load Behavior Collector",
+  "version": "2.0.0",
+  "description": "High-quality behavioral data collection for cognitive load research. Produces structured events for downstream ML/GNN pipelines.",
+
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "alarms",
+    "storage"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "background": {
+    "service_worker": "src/background/service_worker.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["src/content/content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "Behavior Collector"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/questionnaire/questionnaire.html",
+        "src/questionnaire/questionnaire.js",
+        "src/questionnaire/questionnaire.css",
+        "src/shared/schemas.js",
+        "src/shared/utils.js",
+        "src/shared/constants.js"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

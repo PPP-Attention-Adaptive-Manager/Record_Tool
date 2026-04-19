@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session Questionnaire</title>
+  <link rel="stylesheet" href="questionnaire.css">
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>Session Questionnaire</h1>
+    <p>Please complete all sections. Your responses are stored anonymously.</p>
+  </header>
+
+  <!-- ── PART 1: NASA-TLX ─────────────────────────────────────────────────── -->
+  <div class="section">
+    <h2>Part 1 — NASA Task Load Index</h2>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Mental Demand</span>
+        <span class="value" id="val-mental_demand">50</span>
+      </label>
+      <div class="hint">How mentally demanding was the task?</div>
+      <input type="range" id="mental_demand" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Low</span><span>High</span></div>
+    </div>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Physical Demand</span>
+        <span class="value" id="val-physical_demand">50</span>
+      </label>
+      <div class="hint">How physically demanding was the task?</div>
+      <input type="range" id="physical_demand" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Low</span><span>High</span></div>
+    </div>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Temporal Demand</span>
+        <span class="value" id="val-temporal_demand">50</span>
+      </label>
+      <div class="hint">How hurried or rushed was the pace?</div>
+      <input type="range" id="temporal_demand" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Low</span><span>High</span></div>
+    </div>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Performance</span>
+        <span class="value" id="val-performance">50</span>
+      </label>
+      <div class="hint">How successful were you in accomplishing what you were asked to do?</div>
+      <input type="range" id="performance" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Failure</span><span>Perfect</span></div>
+    </div>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Effort</span>
+        <span class="value" id="val-effort">50</span>
+      </label>
+      <div class="hint">How hard did you have to work to accomplish your level of performance?</div>
+      <input type="range" id="effort" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Low</span><span>High</span></div>
+    </div>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Frustration</span>
+        <span class="value" id="val-frustration">50</span>
+      </label>
+      <div class="hint">How insecure, discouraged, irritated, or stressed were you?</div>
+      <input type="range" id="frustration" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Low</span><span>High</span></div>
+    </div>
+  </div>
+
+  <!-- ── PART 2: Stress ────────────────────────────────────────────────────── -->
+  <div class="section">
+    <h2>Part 2 — Stress</h2>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Perceived Stress</span>
+        <span class="value" id="val-stress_self_report">50</span>
+      </label>
+      <div class="hint">How stressed did you feel during this session overall?</div>
+      <input type="range" id="stress_self_report" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Not at all</span><span>Extremely</span></div>
+    </div>
+  </div>
+
+  <!-- ── PART 3: Affect ─────────────────────────────────────────────────────── -->
+  <div class="section">
+    <h2>Part 3 — Emotional State</h2>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Valence</span>
+        <span class="value" id="val-valence">0</span>
+      </label>
+      <div class="hint">How positive or negative did you feel?</div>
+      <input type="range" id="valence" min="-50" max="50" value="0">
+      <div class="axis-labels"><span>Very negative</span><span>Very positive</span></div>
+    </div>
+
+    <div class="slider-row">
+      <label>
+        <span class="name">Arousal</span>
+        <span class="value" id="val-arousal">50</span>
+      </label>
+      <div class="hint">How alert and activated did you feel?</div>
+      <input type="range" id="arousal" min="0" max="100" value="50">
+      <div class="axis-labels"><span>Calm / sleepy</span><span>Excited / alert</span></div>
+    </div>
+  </div>
+
+  <div class="submit-area">
+    <button class="btn-submit" id="btn-submit">Submit</button>
+  </div>
+
+  <!-- Confirmation (shown after submit) -->
+  <div id="done-msg">
+    <h2>Thank you ✓</h2>
+    <p>Your responses have been saved. You may close this tab.</p>
+  </div>
+
+</div>
+
+<script type="module" src="questionnaire.js"></script>
+</body>
+</html>
