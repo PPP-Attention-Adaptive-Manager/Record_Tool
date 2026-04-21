@@ -17,7 +17,9 @@ const manager = new SessionManager();
 // ─────────────────────────────────────────────────────────────────────────────
 // Service worker start-up: restore any active session
 // ─────────────────────────────────────────────────────────────────────────────
-manager.restoreIfNeeded();
+manager.restoreIfNeeded().catch((error) => {
+  console.warn('[SW] restore failed:', error.message);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab events
@@ -79,9 +81,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch(() => sendResponse({ ok: false }));
       return true;
 
+    case 'QUIT_CORE':
+      manager.shutdownCore(Boolean(message.payload?.force))
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
+
     case 'GET_STATUS':
-      sendResponse(manager.getStatus());
-      break;
+      manager.getStatus()
+        .then((status) => sendResponse(status))
+        .catch((err) => sendResponse({ state: 'inactive', error: err.message }));
+      return true;
 
     case 'SCROLL_DATA':
       if (tabId != null) manager.onScrollData(tabId, message.payload);
@@ -96,8 +106,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'DUAL_TASK_RESPONSE':
-      manager.onDualTaskResponse(message.payload);
-      break;
+      manager.onDualTaskResponse(message.payload)
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
 
     case 'SUBMIT_QUESTIONNAIRE':
       manager.onSubmitQuestionnaire(message.payload)

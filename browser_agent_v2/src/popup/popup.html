@@ -12,23 +12,30 @@
     Behavior Collector
   </h1>
 
-  <!-- Active session status -->
   <div id="status-panel">
+    <div class="notice" id="core-notice"></div>
     <div class="row">
       <span>State</span>
-      <span class="val" id="status-state">—</span>
+      <span class="val" id="status-state">-</span>
     </div>
     <div class="row">
       <span>Session ID</span>
-      <span class="val" id="status-sid">—</span>
+      <span class="val" id="status-sid">-</span>
     </div>
     <div class="row">
       <span>Time remaining</span>
-      <span class="val" id="status-time">—</span>
+      <span class="val" id="status-time">-</span>
+    </div>
+    <div class="row">
+      <span>Core link</span>
+      <span class="val" id="status-conn">idle</span>
+    </div>
+    <div class="row">
+      <span>Queued events</span>
+      <span class="val" id="status-queue">0</span>
     </div>
   </div>
 
-  <!-- Start form (hidden while session running) -->
   <div id="start-form">
     <div class="form-group">
       <label for="inp-duration">Session duration (minutes)</label>
@@ -36,50 +43,38 @@
     </div>
 
     <div class="form-group">
-      <label for="inp-uid">Participant ID (optional)</label>
+      <label for="inp-uid">Participant ID</label>
       <input type="text" id="inp-uid" placeholder="e.g. P001">
+    </div>
+
+    <div class="form-group checkbox-row">
+      <label for="inp-enable-influx">Enable InfluxDB mirror on the core if configured</label>
+      <input type="checkbox" id="inp-enable-influx">
     </div>
 
     <button class="btn btn-start" id="btn-start">Start Session</button>
   </div>
 
-  <!-- Stop button (shown while session running) -->
-  <button class="btn btn-stop" id="btn-stop" style="display:none;">
-    Stop Session
-  </button>
+  <button class="btn btn-stop" id="btn-stop" style="display:none;">Stop Session</button>
+  <button class="btn btn-quit" id="btn-quit-core">Quit Core</button>
+  <div id="quit-hint"></div>
 
   <div id="error-msg"></div>
 
-  <!-- ── InfluxDB Settings ──────────────────────────────────────────────── -->
   <div id="settings-toggle">
-    <button class="btn-link" id="btn-toggle-settings">⚙ InfluxDB settings</button>
+    <button class="btn-link" id="btn-toggle-settings">Core settings</button>
   </div>
 
   <div id="settings-panel" style="display:none;">
-    <div class="settings-header">InfluxDB Connection</div>
+    <div class="settings-header">Core Connection</div>
 
     <div class="form-group">
-      <label for="cfg-url">URL</label>
-      <input type="text" id="cfg-url" placeholder="http://localhost:8086">
-    </div>
-    <div class="form-group">
-      <label for="cfg-token">
-        Token
-        <span id="token-status" class="token-badge"></span>
-      </label>
-      <input type="password" id="cfg-token" placeholder="your-influxdb-token" autocomplete="off">
-    </div>
-    <div class="form-group">
-      <label for="cfg-org">Organisation</label>
-      <input type="text" id="cfg-org" placeholder="research">
-    </div>
-    <div class="form-group">
-      <label for="cfg-bucket">Bucket</label>
-      <input type="text" id="cfg-bucket" placeholder="behavior">
+      <label for="cfg-url">Core URL</label>
+      <input type="text" id="cfg-url" placeholder="http://localhost:8765">
     </div>
 
     <button class="btn btn-save" id="btn-save-cfg">Save</button>
-    <div id="cfg-saved-msg" style="display:none;">✓ Saved</div>
+    <div id="cfg-saved-msg" style="display:none;">Saved</div>
   </div>
 
   <script type="module" src="popup.js"></script>

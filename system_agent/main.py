@@ -5,19 +5,17 @@ import logging
 import os
 import signal
 import sys
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
+from werkzeug.serving import make_server
 
 from collector import BehaviorCollector
 from influx_client import InfluxBatchClient
-
-
-def _required_env(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
+from keyboard_collector import KeyboardCollector
+from mouse_collector import MouseCollector
+from server import SessionController, create_app
 
 
 def configure_logging() -> None:
@@ -28,62 +26,94 @@ def configure_logging() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="System behavior collector")
-    parser.add_argument(
-        "--session-minutes",
-        type=float,
-        default=None,
-        help="Optional session duration in minutes (example: 30, 45).",
-    )
+    parser = argparse.ArgumentParser(description="Experiment data-collection core")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    if args.session_minutes is not None and args.session_minutes <= 0:
-        raise RuntimeError("--session-minutes must be > 0")
+def optional_influx_client() -> InfluxBatchClient | None:
+    url = os.getenv("INFLUX_URL", "").strip()
+    token = os.getenv("INFLUX_TOKEN", "").strip()
+    org = os.getenv("INFLUX_ORG", "").strip()
+    bucket = os.getenv("INFLUX_BUCKET", "").strip()
+    if not all([url, token, org, bucket]):
+        logging.info("InfluxDB sink disabled; missing one or more INFLUX_* variables")
+        return None
 
-    configure_logging()
-
-    project_root = Path(__file__).resolve().parents[1]
-    env_file = project_root / ".env"
-    load_dotenv(env_file)
-
-    influx_url = _required_env("INFLUX_URL")
-    influx_token = _required_env("INFLUX_TOKEN")
-    influx_org = _required_env("INFLUX_ORG")
-    influx_bucket = _required_env("INFLUX_BUCKET")
-
-    influx_client = InfluxBatchClient(
-        url=influx_url,
-        token=influx_token,
-        org=influx_org,
-        bucket=influx_bucket,
+    return InfluxBatchClient(
+        url=url,
+        token=token,
+        org=org,
+        bucket=bucket,
         batch_size=100,
         flush_interval=3.0,
         max_retries=3,
         request_timeout=10.0,
     )
-    collector = BehaviorCollector(
+
+
+def main() -> int:
+    args = parse_args()
+    configure_logging()
+
+    project_root = Path(__file__).resolve().parents[1]
+    load_dotenv(project_root / ".env")
+
+    influx_client = optional_influx_client()
+    if influx_client is not None:
+        influx_client.start()
+
+    controller = SessionController(
+        data_dir=project_root / "data",
+        schema_path=Path(__file__).resolve().parent / "schemas" / "event_schema.json",
         influx_client=influx_client,
-        user_id="u1",
-        poll_interval=0.5,
-        emit_interval=30.0,
-        merge_flush_threshold=30.0,
     )
+    collector = BehaviorCollector(controller=controller)
+    keyboard_collector = KeyboardCollector(controller=controller)
+    mouse_collector = MouseCollector(controller=controller)
 
-    def _handle_signal(_signum: int, _frame: object) -> None:
+    collector_thread = threading.Thread(
+        target=collector.run_forever,
+        name="system-event-collector",
+        daemon=True,
+    )
+    collector_thread.start()
+    keyboard_collector.start()
+    mouse_collector.start()
+
+    shutdown_requested = threading.Event()
+    server_ref: dict[str, object] = {}
+
+    def request_shutdown() -> None:
+        if shutdown_requested.is_set():
+            return
         logging.info("Shutdown signal received")
+        shutdown_requested.set()
         collector.request_stop()
+        http_server = server_ref.get("server")
+        if http_server is not None:
+            http_server.shutdown()
 
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, lambda _signum, _frame: request_shutdown())
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: request_shutdown())
 
-    influx_client.start()
+    app = create_app(controller, shutdown_callback=request_shutdown)
+    http_server = make_server(args.host, args.port, app, threaded=True)
+    server_ref["server"] = http_server
+
+    logging.info("Core server listening on http://%s:%s", args.host, args.port)
     try:
-        collector.run_forever(session_minutes=args.session_minutes)
+        http_server.serve_forever()
     finally:
-        influx_client.stop()
+        request_shutdown()
+        keyboard_collector.stop()
+        mouse_collector.stop()
+        collector_thread.join(timeout=2.0)
+        if influx_client is not None:
+            influx_client.stop()
+        http_server.server_close()
+        logging.info("Core shutdown complete")
 
     return 0
 

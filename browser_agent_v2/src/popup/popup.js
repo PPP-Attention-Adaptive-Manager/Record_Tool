@@ -1,115 +1,149 @@
-/**
- * Popup controller.
- *
- * Extension pages support ES modules natively — no bundler needed here.
- * Communicates with the service worker via chrome.runtime.sendMessage.
- *
- * InfluxDB credentials are stored in chrome.storage.local (never hardcoded).
- * The settings panel lets the researcher enter them once; they persist across
- * browser restarts.
- */
+import { CORE_CONFIG, STORAGE_KEYS } from '../shared/constants.js';
 
-const STORAGE_CONFIG_KEY = 'influx_config';
+const dot = document.getElementById('state-dot');
+const statusPanel = document.getElementById('status-panel');
+const startForm = document.getElementById('start-form');
+const btnStart = document.getElementById('btn-start');
+const btnStop = document.getElementById('btn-stop');
+const inpDur = document.getElementById('inp-duration');
+const inpUid = document.getElementById('inp-uid');
+const inpEnableInflux = document.getElementById('inp-enable-influx');
+const btnQuitCore = document.getElementById('btn-quit-core');
+const coreNotice = document.getElementById('core-notice');
+const quitHint = document.getElementById('quit-hint');
+const statusState = document.getElementById('status-state');
+const statusSid = document.getElementById('status-sid');
+const statusTime = document.getElementById('status-time');
+const statusConn = document.getElementById('status-conn');
+const statusQueue = document.getElementById('status-queue');
+const errorMsg = document.getElementById('error-msg');
 
-// ── DOM refs ──────────────────────────────────────────────────────────────────
-const dot          = document.getElementById('state-dot');
-const statusPanel  = document.getElementById('status-panel');
-const startForm    = document.getElementById('start-form');
-const btnStart     = document.getElementById('btn-start');
-const btnStop      = document.getElementById('btn-stop');
-const inpDur       = document.getElementById('inp-duration');
-const inpUid       = document.getElementById('inp-uid');
-const statusState  = document.getElementById('status-state');
-const statusSid    = document.getElementById('status-sid');
-const statusTime   = document.getElementById('status-time');
-const errorMsg     = document.getElementById('error-msg');
-
-// Settings panel
-const btnToggle    = document.getElementById('btn-toggle-settings');
+const btnToggle = document.getElementById('btn-toggle-settings');
 const settingsPane = document.getElementById('settings-panel');
-const cfgUrl       = document.getElementById('cfg-url');
-const cfgToken     = document.getElementById('cfg-token');
-const cfgOrg       = document.getElementById('cfg-org');
-const cfgBucket    = document.getElementById('cfg-bucket');
-const btnSaveCfg   = document.getElementById('btn-save-cfg');
-const cfgSavedMsg  = document.getElementById('cfg-saved-msg');
-const tokenBadge   = document.getElementById('token-status');
+const cfgUrl = document.getElementById('cfg-url');
+const btnSaveCfg = document.getElementById('btn-save-cfg');
+const cfgSavedMsg = document.getElementById('cfg-saved-msg');
 
-// ── State ─────────────────────────────────────────────────────────────────────
 let statusInterval = null;
 
-// ── Init ──────────────────────────────────────────────────────────────────────
 loadConfig().then(renderConfig);
 refreshStatus();
 
-// ── Event listeners ────────────────────────────────────────────────────────────
-btnStart.addEventListener('click',     onStartClick);
-btnStop.addEventListener('click',      onStopClick);
-btnToggle.addEventListener('click',    toggleSettings);
-btnSaveCfg.addEventListener('click',   onSaveConfig);
-
-// ── Session functions ─────────────────────────────────────────────────────────
+btnStart.addEventListener('click', onStartClick);
+btnStop.addEventListener('click', onStopClick);
+btnQuitCore.addEventListener('click', onQuitCoreClick);
+btnToggle.addEventListener('click', toggleSettings);
+btnSaveCfg.addEventListener('click', onSaveConfig);
 
 async function onStartClick() {
   clearError();
 
-  const cfg = await loadConfig();
-  if (!cfg.TOKEN) {
-    showError('InfluxDB token is not set. Open ⚙ settings below.');
-    settingsPane.style.display = 'block';
-    cfgToken.focus();
+  const duration = parseInt(inpDur.value, 10);
+  const userId = inpUid.value.trim();
+  if (!/^P\d{3}$/.test(userId)) {
+    showError('Participant ID must look like P001.');
     return;
   }
-
-  const duration = parseInt(inpDur.value, 10);
-  const userId   = inpUid.value.trim() || 'anonymous';
-
   if (!duration || duration < 1 || duration > 180) {
-    showError('Duration must be 1–180 minutes.');
+    showError('Duration must be 1-180 minutes.');
     return;
   }
 
   btnStart.disabled = true;
-
-  const res = await send({
-    type:    'START_SESSION',
-    payload: { duration_minutes: duration, user_id: userId },
+  const response = await send({
+    type: 'START_SESSION',
+    payload: {
+      duration_minutes: duration,
+      user_id: userId,
+      enable_influx: inpEnableInflux.checked,
+    },
   });
 
-  if (res?.ok) {
-    refreshStatus();
+  if (response?.ok) {
+    await refreshStatus();
     startPolling();
   } else {
-    showError('Could not start session. Check the service worker.');
+    showError(response?.error || 'Could not start session.');
     btnStart.disabled = false;
   }
 }
 
 async function onStopClick() {
   btnStop.disabled = true;
-  await send({ type: 'STOP_SESSION' });
+  const response = await send({ type: 'STOP_SESSION' });
+  if (!response?.ok) {
+    showError(response?.error || 'Could not stop session.');
+  }
   stopPolling();
-  refreshStatus();
+  await refreshStatus();
   btnStop.disabled = false;
+}
+
+async function onQuitCoreClick() {
+  clearError();
+  if (btnQuitCore.classList.contains('hidden') || btnQuitCore.disabled) {
+    return;
+  }
+  btnQuitCore.disabled = true;
+
+  let response = await send({ type: 'QUIT_CORE', payload: { force: false } });
+  if (!response?.ok && /Stop the active session|active session/i.test(response?.error || '')) {
+    const force = window.confirm('A session is still active. Force-stop the session and quit the core?');
+    if (force) {
+      response = await send({ type: 'QUIT_CORE', payload: { force: true } });
+    }
+  }
+
+  if (!response?.ok) {
+    showError(response?.error || 'Could not quit the core.');
+  } else {
+    stopPolling();
+    await refreshStatus();
+  }
+
+  btnQuitCore.disabled = false;
 }
 
 async function refreshStatus() {
   const status = await send({ type: 'GET_STATUS' });
-  if (!status) return;
+  if (!status) {
+    dot.className = 'dot finished';
+    statusPanel.classList.add('visible');
+    statusState.textContent = 'offline';
+    statusSid.textContent = '-';
+    statusTime.textContent = '-';
+    statusConn.textContent = 'service worker unavailable';
+    statusQueue.textContent = '-';
+    renderCoreNotice('offline', 'The extension cannot reach its background worker right now.');
+    btnStop.style.display = 'none';
+    startForm.style.display = '';
+    btnStart.disabled = false;
+    btnQuitCore.classList.remove('hidden');
+    btnQuitCore.disabled = true;
+    quitHint.textContent = 'Reload the extension if this state persists.';
+    return;
+  }
 
   const active = ['running', 'hidden', 'background', 'idle'].includes(status.state);
-
+  const connectionState = status.transport?.connection_state || 'idle';
   dot.className = `dot ${status.state}`;
+
+  statusConn.textContent = humanizeConnectionState(connectionState);
+  statusQueue.textContent = String(status.transport?.queued_events ?? 0);
+  renderTransportNotice(connectionState, status.transport?.queued_events ?? 0);
 
   if (active) {
     startForm.style.display = 'none';
-    btnStop.style.display   = 'block';
+    btnStop.style.display = 'block';
+    btnQuitCore.classList.add('hidden');
+    btnQuitCore.disabled = true;
+    quitHint.textContent = 'Stop the session before quitting the core.';
     statusPanel.classList.add('visible');
 
     statusState.textContent = status.state;
-    statusSid.textContent   = status.session_id
-      ? status.session_id.slice(0, 8) + '…'
-      : '—';
+    statusSid.textContent = status.session_id
+      ? `${status.session_id.slice(0, 18)}...`
+      : '-';
 
     if (status.session_start_ms && status.session_duration_ms) {
       const remaining = Math.max(
@@ -117,89 +151,71 @@ async function refreshStatus() {
         status.session_duration_ms - (Date.now() - status.session_start_ms),
       );
       statusTime.textContent = formatDuration(remaining);
+    } else {
+      statusTime.textContent = '-';
     }
-
     startPolling();
   } else {
     startForm.style.display = '';
-    btnStop.style.display   = 'none';
-    btnStart.disabled       = false;
-    statusPanel.classList.remove('visible');
+    btnStop.style.display = 'none';
+    btnStart.disabled = false;
+    btnQuitCore.classList.remove('hidden');
+    btnQuitCore.disabled = connectionState === 'offline';
+    quitHint.textContent = connectionState === 'offline'
+      ? 'Core already looks offline.'
+      : 'This stops the local Python core, not just the current session.';
+    statusPanel.classList.add('visible');
+    statusState.textContent = connectionState === 'offline' ? 'offline' : 'ready';
+    statusSid.textContent = '-';
+    statusTime.textContent = '-';
     stopPolling();
   }
 }
 
 function startPolling() {
-  if (statusInterval) return;
+  if (statusInterval) {
+    return;
+  }
   statusInterval = setInterval(refreshStatus, 3_000);
 }
 
 function stopPolling() {
-  if (!statusInterval) return;
+  if (!statusInterval) {
+    return;
+  }
   clearInterval(statusInterval);
   statusInterval = null;
 }
 
-// ── Settings functions ────────────────────────────────────────────────────────
-
 function toggleSettings() {
   const open = settingsPane.style.display !== 'none';
   settingsPane.style.display = open ? 'none' : 'block';
-  btnToggle.textContent = open ? '⚙ InfluxDB settings' : '⚙ Hide settings';
+  btnToggle.textContent = open ? 'Core settings' : 'Hide settings';
 }
 
 async function loadConfig() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(STORAGE_CONFIG_KEY, ({ [STORAGE_CONFIG_KEY]: stored }) => {
-      resolve(stored ?? {});
-    });
-  });
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.CORE_CONFIG);
+  return { ...CORE_CONFIG, ...(stored[STORAGE_KEYS.CORE_CONFIG] ?? {}) };
 }
 
 function renderConfig(cfg) {
-  cfgUrl.value    = cfg.URL    ?? 'http://localhost:8086';
-  cfgOrg.value    = cfg.ORG    ?? 'research';
-  cfgBucket.value = cfg.BUCKET ?? 'behavior';
-  // Never pre-fill the token field — just show a badge
-  cfgToken.value  = '';
-  updateTokenBadge(!!cfg.TOKEN);
-}
-
-function updateTokenBadge(hasToken) {
-  if (hasToken) {
-    tokenBadge.textContent = '✓ set';
-    tokenBadge.className   = 'token-badge ok';
-  } else {
-    tokenBadge.textContent = '✗ missing';
-    tokenBadge.className   = 'token-badge missing';
-  }
+  cfgUrl.value = cfg.URL ?? CORE_CONFIG.URL;
 }
 
 async function onSaveConfig() {
   cfgSavedMsg.style.display = 'none';
-
-  const existing = await loadConfig();
-
   const newCfg = {
-    URL:    cfgUrl.value.trim()    || 'http://localhost:8086',
-    ORG:    cfgOrg.value.trim()    || 'research',
-    BUCKET: cfgBucket.value.trim() || 'behavior',
-    // Only overwrite the token if the field is non-empty
-    TOKEN:  cfgToken.value.trim()  || existing.TOKEN || '',
+    URL: cfgUrl.value.trim() || CORE_CONFIG.URL,
   };
-
-  chrome.storage.local.set({ [STORAGE_CONFIG_KEY]: newCfg }, () => {
-    cfgToken.value = '';            // clear field after save
-    updateTokenBadge(!!newCfg.TOKEN);
-    cfgSavedMsg.style.display = 'block';
-    setTimeout(() => { cfgSavedMsg.style.display = 'none'; }, 2_000);
-  });
+  await chrome.storage.local.set({ [STORAGE_KEYS.CORE_CONFIG]: newCfg });
+  cfgSavedMsg.style.display = 'block';
+  setTimeout(() => {
+    cfgSavedMsg.style.display = 'none';
+  }, 2_000);
 }
 
-// ── Utility ───────────────────────────────────────────────────────────────────
-
-function showError(msg) {
-  errorMsg.textContent = msg;
+function showError(message) {
+  errorMsg.textContent = message;
   errorMsg.classList.add('visible');
 }
 
@@ -208,9 +224,51 @@ function clearError() {
   errorMsg.classList.remove('visible');
 }
 
+function renderTransportNotice(connectionState, queuedEvents) {
+  if (connectionState === 'offline') {
+    renderCoreNotice(
+      'offline',
+      queuedEvents > 0
+        ? `Core is offline. ${queuedEvents} event(s) are queued and will retry automatically.`
+        : 'Core is offline. Start the Python core to begin or resume syncing.',
+    );
+    return;
+  }
+
+  if (connectionState === 'buffering') {
+    renderCoreNotice(
+      'buffering',
+      queuedEvents > 0
+        ? `Sync is in progress. ${queuedEvents} queued event(s) are waiting to flush.`
+        : 'Preparing to sync events to the local core.',
+    );
+    return;
+  }
+
+  renderCoreNotice('online', 'Core connection looks healthy.');
+}
+
+function renderCoreNotice(kind, message) {
+  coreNotice.textContent = message;
+  coreNotice.className = `notice visible ${kind}`;
+}
+
+function humanizeConnectionState(connectionState) {
+  switch (connectionState) {
+    case 'online':
+      return 'online';
+    case 'buffering':
+      return 'buffering';
+    case 'offline':
+      return 'offline';
+    default:
+      return 'idle';
+  }
+}
+
 function formatDuration(ms) {
-  const s = Math.floor(ms / 1_000);
-  return `${Math.floor(s / 60)}m ${(s % 60).toString().padStart(2, '0')}s`;
+  const seconds = Math.floor(ms / 1000);
+  return `${Math.floor(seconds / 60)}m ${(seconds % 60).toString().padStart(2, '0')}s`;
 }
 
 function send(message) {

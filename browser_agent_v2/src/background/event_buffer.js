@@ -90,7 +90,8 @@ export class EventBuffer {
       user_id:                   sessionMeta.user_id,
       event_type:                eventType,
       timestamp:                 now,
-      duration_since_last_event: now - s.last_event_time,
+      duration_since_last_event: (now - s.last_event_time) / 1000,
+      source:                    'browser',
 
       // Tab
       tab_id:       tabId,

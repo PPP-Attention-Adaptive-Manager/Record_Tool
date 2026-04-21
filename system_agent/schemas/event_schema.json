@@ -1,0 +1,264 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BehavioralEvent",
+  "type": "object",
+  "required": [
+    "session_id",
+    "user_id",
+    "event_id",
+    "event_type",
+    "timestamp"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "pattern": "^sess_[0-9]{8}_[0-9]{6}_[a-f0-9]{6}$"
+    },
+    "user_id": {
+      "type": "string",
+      "pattern": "^P[0-9]{3}$"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt_[a-f0-9]{8}$"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "start_session",
+        "end_session",
+        "switch",
+        "scroll",
+        "tab_hidden",
+        "background",
+        "idle",
+        "focus",
+        "app_focus",
+        "keyboard_input",
+        "mouse_input",
+        "dual_task",
+        "questionnaire"
+      ]
+    },
+    "timestamp": {
+      "type": "integer",
+      "minimum": 1704067200000
+    },
+    "duration_since_last_event": {
+      "type": "number",
+      "minimum": 0
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "browser",
+        "system"
+      ]
+    },
+    "tab_id": {
+      "type": "integer"
+    },
+    "window_id": {
+      "type": "integer"
+    },
+    "full_url": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9.-]*$"
+    },
+    "path": {
+      "type": "string"
+    },
+    "query_string": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "scroll_delta_cumulative": {
+      "type": "number",
+      "minimum": 0
+    },
+    "scroll_depth_last": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "scroll_depth_max": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "scroll_event_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tab_active": {
+      "type": "boolean"
+    },
+    "visibility_state": {
+      "type": "string",
+      "enum": [
+        "visible",
+        "hidden",
+        "prerender"
+      ]
+    },
+    "chrome_in_foreground": {
+      "type": "boolean"
+    },
+    "site_type": {
+      "type": "string",
+      "enum": [
+        "development",
+        "search",
+        "communication",
+        "social",
+        "entertainment",
+        "productivity",
+        "shopping",
+        "education",
+        "news",
+        "unknown"
+      ]
+    },
+    "task_hint": {
+      "type": "string",
+      "enum": [
+        "coding",
+        "searching",
+        "watching",
+        "writing",
+        "communicating",
+        "reading",
+        "browsing",
+        "shopping",
+        "unknown"
+      ]
+    },
+    "app_name": {
+      "type": "string"
+    },
+    "window_title": {
+      "type": "string"
+    },
+    "duration": {
+      "type": "number",
+      "minimum": 0
+    },
+    "reaction_time": {
+      "type": "integer",
+      "minimum": -1
+    },
+    "dual_task_success": {
+      "type": "integer",
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "dual_task_error": {
+      "type": "integer",
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "missed_response": {
+      "type": "integer",
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "mental_demand": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "physical_demand": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "temporal_demand": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "performance": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "effort": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "frustration": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "stress_self_report": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "valence": {
+      "type": "integer",
+      "minimum": -50,
+      "maximum": 50
+    },
+    "arousal": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "input_device": {
+      "type": "string",
+      "enum": [
+        "keyboard",
+        "mouse"
+      ]
+    },
+    "input_action": {
+      "type": "string",
+      "enum": [
+        "press",
+        "release",
+        "move",
+        "click",
+        "scroll"
+      ]
+    },
+    "key_value": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "button": {
+      "type": "string",
+      "maxLength": 40
+    },
+    "pressed": {
+      "type": "boolean"
+    },
+    "pointer_x": {
+      "type": "integer"
+    },
+    "pointer_y": {
+      "type": "integer"
+    },
+    "wheel_delta_x": {
+      "type": "integer"
+    },
+    "wheel_delta_y": {
+      "type": "integer"
+    }
+  },
+  "additionalProperties": true
+}

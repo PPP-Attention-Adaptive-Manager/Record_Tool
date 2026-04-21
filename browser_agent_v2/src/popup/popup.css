@@ -79,6 +79,22 @@ input[type="text"] {
   transition: border-color .2s;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.checkbox-row label {
+  margin-bottom: 0;
+  flex: 1;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
 input:focus {
   border-color: var(--accent2);
 }
@@ -102,6 +118,15 @@ input::-webkit-inner-spin-button { opacity: 0.5; }
 
 .btn-start { background: var(--accent);  color: #0f1117; }
 .btn-stop  { background: var(--danger);  color: #fff; }
+.btn-quit  {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  margin-top: 10px;
+}
+.btn-quit.hidden {
+  display: none;
+}
 
 /* ── Status panel ────────────────────────────────────────────────────────────── */
 #status-panel {
@@ -125,6 +150,37 @@ input::-webkit-inner-spin-button { opacity: 0.5; }
 #status-panel .row:last-child { margin-bottom: 0; }
 #status-panel .val { color: var(--text); font-weight: 500; }
 
+#status-panel .notice {
+  display: none;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+#status-panel .notice.visible {
+  display: block;
+}
+
+#status-panel .notice.offline {
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #fecaca;
+}
+
+#status-panel .notice.buffering {
+  background: rgba(250, 204, 21, 0.1);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  color: #fde68a;
+}
+
+#status-panel .notice.online {
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.25);
+  color: #bbf7d0;
+}
+
 /* ── Error ───────────────────────────────────────────────────────────────────── */
 #error-msg {
   font-size: 12px;
@@ -133,6 +189,13 @@ input::-webkit-inner-spin-button { opacity: 0.5; }
   display: none;
 }
 #error-msg.visible { display: block; }
+
+#quit-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+  min-height: 18px;
+}
 
 /* ── Settings toggle link ───────────────────────────────────────────────────── */
 #settings-toggle {
@@ -182,14 +245,3 @@ input::-webkit-inner-spin-button { opacity: 0.5; }
   text-align: center;
 }
 
-/* Token presence badge */
-.token-badge {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 4px;
-  margin-left: 6px;
-  vertical-align: middle;
-}
-.token-badge.ok      { background: #14532d; color: var(--accent); }
-.token-badge.missing { background: #450a0a; color: var(--danger); }

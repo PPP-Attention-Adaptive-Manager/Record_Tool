@@ -12,6 +12,15 @@ export function generateUUID() {
   });
 }
 
+export function generateEventId() {
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    return `evt_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return `evt_${Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0')}`;
+}
+
 /** Current time in milliseconds (Unix epoch). */
 export function nowMs() {
   return Date.now();
