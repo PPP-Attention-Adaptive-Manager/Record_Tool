@@ -1,0 +1,1 @@
+timestamp,session_id,device_id,event_type,url,title,tab_id,scroll_delta_y,scroll_total_y,duration_ms,extra

@@ -1,72 +1,73 @@
-# Cognitive Behavior Data Collection System
+# Cognitive Behavior Collection System
 
-Production-oriented, synchronized multi-component collection stack with:
+This project is split into two components:
 
-- System-level behavior tracking (application switches, browser focus)
-- Browser behavior extension stream (tabs, navigation, scroll aggregation, focus/idle/background)
-- Independent keyboard stream
-- Independent mouse stream
-- Experimental signals (dual-task reaction probes)
-- Subjective labels (NASA-TLX + stress + emotion)
+- `system_agent/`: master orchestrator and single source of truth for session timing/state
+- `browser_agent_v2/`: passive browser collector + UI display, driven by system-agent commands
 
-No machine learning is implemented.
+## Corrected Architecture
 
-## Architecture
+System agent responsibilities:
 
-System Agent (`system_agent/`) is the single source of truth:
+- Startup configuration flow:
+  - mode (`experimental` or `production`)
+  - session duration
+  - CSV export enabled
+  - Influx export enabled
+  - dual-task enabled
+  - questionnaire enabled
+- Global session timer ownership (elapsed/remaining)
+- Browser foreground detection (OS active-window tracking)
+- Recording orchestration commands:
+  - `start_recording` / `resume_recording` when browser is foreground
+  - `pause_recording` when browser leaves foreground
+  - `stop_recording` on session end
+- Periodic dual-task probe triggering (experimental mode only)
+- Session-end questionnaire trigger in browser
 
-1. Controls session lifecycle and timing
-2. Commands passive browser extensions (`start/pause/resume/stop_recording`)
-3. Synchronizes extension timestamps to system time
-4. Merges streams and writes to:
-   - InfluxDB buckets: `behavior_bucket`, `keyboard_bucket`, `mouse_bucket`
-   - Session CSV folder: `data/<session_id>/`
+Extension responsibilities:
 
-Browser extension (`browser_agent_v2/`) is passive:
-
-- Polls command channel through heartbeat
-- Collects browser events
-- Aggregates scroll metrics and flushes only on checkpoints
-- Sends event batches with `device_id` and `session_id`
-
-## Mode Toggle
-
-Set `MODE` in environment:
-
-- `experimental`: dual-task + questionnaire enabled
-- `production`: dual-task + questionnaire disabled
-
-## Run
-
-1. Install Python dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-2. Start system agent from `cognitive_system/`:
-
-```bash
-python -m system_agent.main --duration-minutes 30
-```
-
-3. Load browser extension:
-
-- Open browser extension page (developer mode)
-- Load unpacked folder: `cognitive_system/browser_agent_v2`
+- Record browser events only when instructed
+- Display agent-provided session status:
+  - `inactive` / `running` / `paused`
+  - session id
+  - mode
+  - elapsed time
+  - remaining time
+  - browser recording active
+- Show reaction-time probe overlay when requested by agent
+- Open browser questionnaire page on `open_questionnaire`
 
 ## Session Output
 
-For each session:
+Per session:
 
 - `data/<session_id>/behavior.csv`
 - `data/<session_id>/keyboard.csv`
 - `data/<session_id>/mouse.csv`
 - `data/<session_id>/labels.csv`
 
-## Communication API (localhost:5000)
+## Dependency Policy
 
-- `POST /v1/extensions/heartbeat`
-- `POST /v1/extensions/events`
-- `GET /v1/health`
+No silent degraded mode for critical runtime dependencies:
+
+- `websockets` and `aiohttp` are required
+- if Influx is enabled, `influxdb-client` is required
+- if keyboard/mouse tracking is enabled, `pynput` is required
+- `psutil` is required for active-app browser foreground detection
+
+## Run
+
+From `cognitive_system/`:
+
+```bash
+python setup.py
+.venv/Scripts/python system_agent/main.py
+```
+
+Then load unpacked extension:
+
+- Chrome -> `chrome://extensions`
+- Enable Developer Mode
+- Load unpacked -> `cognitive_system/browser_agent_v2`
 

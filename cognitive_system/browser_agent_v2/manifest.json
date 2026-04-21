@@ -12,7 +12,8 @@
     "activeTab"
   ],
   "host_permissions": [
-    "http://localhost:8080/*"
+    "http://localhost:8080/*",
+    "ws://localhost:8765/*"
   ],
   "background": {
     "service_worker": "src/background/background.js",

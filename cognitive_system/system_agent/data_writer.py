@@ -1,198 +1,271 @@
-﻿import os
+from __future__ import annotations
+
 import csv
-import time
+import json
 import logging
 import threading
+import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
+from .config import RuntimeConfig
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from influxdb_client import InfluxDBClient, Point, WritePrecision
     from influxdb_client.client.write_api import SYNCHRONOUS
-    INFLUXDB_AVAILABLE = True
-except ImportError:
-    INFLUXDB_AVAILABLE = False
-    logger.warning("influxdb-client not installed - InfluxDB writes disabled")
+except ImportError:  # handled by startup dependency validation
+    InfluxDBClient = None  # type: ignore[assignment]
+    Point = None  # type: ignore[assignment]
+    WritePrecision = None  # type: ignore[assignment]
+    SYNCHRONOUS = None  # type: ignore[assignment]
+
+
+def _as_epoch_seconds(value: Any) -> float:
+    if value is None:
+        return time.time()
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return time.time()
 
 
 class DataWriter:
-    """Writes all events to InfluxDB and session CSV files. One event = one write."""
+    """Atomic writes to configured sinks (CSV and optional InfluxDB)."""
 
     _CSV_SCHEMAS = {
         "behavior": [
-            "timestamp", "session_id", "device_id", "event_type",
-            "url", "title", "tab_id",
-            "scroll_delta_y", "scroll_total_y", "duration_ms", "extra",
+            "timestamp",
+            "session_id",
+            "device_id",
+            "event_type",
+            "url",
+            "title",
+            "tab_id",
+            "scroll_delta_y",
+            "scroll_total_y",
+            "duration_ms",
+            "reaction_time_ms",
+            "miss",
+            "error",
+            "extra",
         ],
         "keyboard": [
-            "timestamp", "session_id", "device_id", "event_type",
-            "key", "key_code", "modifiers", "interval_ms",
+            "timestamp",
+            "session_id",
+            "device_id",
+            "event_type",
+            "key",
+            "interval_ms",
         ],
         "mouse": [
-            "timestamp", "session_id", "device_id", "event_type",
-            "x", "y", "button", "delta_x", "delta_y", "speed",
+            "timestamp",
+            "session_id",
+            "device_id",
+            "event_type",
+            "x",
+            "y",
+            "button",
+            "delta_x",
+            "delta_y",
+            "speed",
         ],
         "labels": [
-            "timestamp", "session_id", "device_id",
-            "mental_demand", "physical_demand", "temporal_demand",
-            "performance", "effort", "frustration",
-            "stress_self_report", "valence", "arousal", "notes",
+            "timestamp",
+            "session_id",
+            "device_id",
+            "mental_demand",
+            "physical_demand",
+            "temporal_demand",
+            "performance",
+            "effort",
+            "frustration",
+            "stress_self_report",
+            "valence",
+            "arousal",
         ],
     }
 
-    def __init__(self, config):
-        self.config = config
-        self._lock = threading.Lock()
-        self._session_id: Optional[str] = None
-        self._csv_writers: Dict[str, csv.DictWriter] = {}
-        self._csv_files: Dict[str, Any] = {}
-        self._influx_client = None
-        self._write_api = None
-        if INFLUXDB_AVAILABLE:
-            self._init_influxdb()
+    _STREAM_TO_BUCKET = {
+        "behavior": "influxdb_behavior_bucket",
+        "keyboard": "influxdb_keyboard_bucket",
+        "mouse": "influxdb_mouse_bucket",
+        "labels": "influxdb_behavior_bucket",
+    }
 
-    def _init_influxdb(self):
+    _STREAM_TO_MEASUREMENT = {
+        "behavior": "behavior_event",
+        "keyboard": "keyboard_event",
+        "mouse": "mouse_event",
+        "labels": "label_event",
+    }
+
+    def __init__(self, config: RuntimeConfig):
+        self._config = config
+        self._lock = threading.Lock()
+
+        self._session_id: Optional[str] = None
+        self._session_dir: Optional[Path] = None
+        self._csv_writers: Dict[str, csv.DictWriter] = {}
+        self._csv_handles: Dict[str, Any] = {}
+
+        self._influx_client = None
+        self._influx_writer = None
+        if self._config.influx_enabled:
+            self._init_influx()
+
+    def _init_influx(self) -> None:
+        if not self._config.influxdb_token:
+            raise RuntimeError(
+                "Influx export is enabled but INFLUXDB_TOKEN is empty. "
+                "Set INFLUXDB_TOKEN or disable Influx export."
+            )
+        if InfluxDBClient is None:
+            raise RuntimeError(
+                "Influx export is enabled but influxdb-client is unavailable. "
+                "Install it with `pip install influxdb-client`."
+            )
         try:
             self._influx_client = InfluxDBClient(
-                url=self.config.influxdb_url,
-                token=self.config.influxdb_token,
-                org=self.config.influxdb_org,
+                url=self._config.influxdb_url,
+                token=self._config.influxdb_token,
+                org=self._config.influxdb_org,
                 timeout=5_000,
             )
-            self._write_api = self._influx_client.write_api(write_options=SYNCHRONOUS)
-            logger.info("InfluxDB client initialized")
+            self._influx_writer = self._influx_client.write_api(write_options=SYNCHRONOUS)
+            LOGGER.info("InfluxDB writer connected to %s", self._config.influxdb_url)
         except Exception as exc:
-            logger.error(f"InfluxDB init failed: {exc}")
-            self._influx_client = None
-            self._write_api = None
+            raise RuntimeError(f"Failed to initialize InfluxDB writer: {exc}") from exc
 
-    def start_session(self, session_id: str):
+    def start_session(self, session_id: str) -> None:
         with self._lock:
+            self._close_csv_handles_locked()
             self._session_id = session_id
-            session_dir = os.path.join(self.config.data_dir, session_id)
-            os.makedirs(session_dir, exist_ok=True)
-            for name, headers in self._CSV_SCHEMAS.items():
-                path = os.path.join(session_dir, f"{name}.csv")
-                f = open(path, "w", newline="", encoding="utf-8")
-                writer = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
-                writer.writeheader()
-                self._csv_files[name] = f
-                self._csv_writers[name] = writer
-            logger.info(f"CSV files opened for session: {session_id}")
+            self._session_dir = self._config.data_dir / session_id
+            self._session_dir.mkdir(parents=True, exist_ok=True)
 
-    def end_session(self):
+            if self._config.csv_enabled:
+                for stream, columns in self._CSV_SCHEMAS.items():
+                    path = self._session_dir / f"{stream}.csv"
+                    handle = path.open("w", newline="", encoding="utf-8")
+                    writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+                    writer.writeheader()
+                    self._csv_handles[stream] = handle
+                    self._csv_writers[stream] = writer
+            LOGGER.info("Session outputs initialized at %s", self._session_dir)
+
+    def end_session(self) -> None:
         with self._lock:
-            for f in self._csv_files.values():
-                try:
-                    f.flush(); f.close()
-                except Exception:
-                    pass
-            self._csv_files.clear()
-            self._csv_writers.clear()
+            self._close_csv_handles_locked()
             self._session_id = None
+            self._session_dir = None
 
-    def write_behavior_event(self, event: dict):
-        self._inject_ids(event)
-        self._write_csv("behavior", event)
-        self._influx_write_behavior(event)
-
-    def write_keyboard_event(self, event: dict):
-        self._inject_ids(event)
-        self._write_csv("keyboard", event)
-        self._influx_write_keyboard(event)
-
-    def write_mouse_event(self, event: dict):
-        self._inject_ids(event)
-        self._write_csv("mouse", event)
-        self._influx_write_mouse(event)
-
-    def write_labels(self, labels: dict):
-        self._inject_ids(labels)
-        labels.setdefault("timestamp", time.time())
-        self._write_csv("labels", labels)
-        logger.info(f"Labels saved for session {self._session_id}")
-
-    def _inject_ids(self, event: dict):
-        event.setdefault("session_id", self._session_id)
-        event.setdefault("device_id", self.config.device_id)
-
-    def _write_csv(self, name: str, row: dict):
-        with self._lock:
-            writer = self._csv_writers.get(name)
-            if writer is None:
-                return
-            try:
-                writer.writerow(row)
-                self._csv_files[name].flush()
-            except Exception as exc:
-                logger.error(f"CSV write error ({name}): {exc}")
-
-    def _influx_write_behavior(self, event: dict):
-        if not self._write_api:
-            return
-        try:
-            ns = int(event.get("timestamp", time.time()) * 1e9)
-            point = (
-                Point("browser_event")
-                .tag("session_id", event.get("session_id", ""))
-                .tag("device_id", event.get("device_id", ""))
-                .tag("event_type", event.get("event_type", ""))
-                .field("url", str(event.get("url", "")))
-                .field("title", str(event.get("title", "")))
-                .field("scroll_delta_y", float(event.get("scroll_delta_y", 0)))
-                .field("scroll_total_y", float(event.get("scroll_total_y", 0)))
-                .field("duration_ms", float(event.get("duration_ms", 0)))
-                .time(ns, WritePrecision.NANOSECONDS)
-            )
-            self._write_api.write(bucket=self.config.influxdb_behavior_bucket,
-                                  org=self.config.influxdb_org, record=point)
-        except Exception as exc:
-            logger.debug(f"InfluxDB behavior write: {exc}")
-
-    def _influx_write_keyboard(self, event: dict):
-        if not self._write_api:
-            return
-        try:
-            ns = int(event.get("timestamp", time.time()) * 1e9)
-            point = (
-                Point("keyboard_event")
-                .tag("session_id", event.get("session_id", ""))
-                .tag("device_id", event.get("device_id", ""))
-                .tag("event_type", event.get("event_type", ""))
-                .field("key", str(event.get("key", "")))
-                .field("interval_ms", float(event.get("interval_ms", 0)))
-                .time(ns, WritePrecision.NANOSECONDS)
-            )
-            self._write_api.write(bucket=self.config.influxdb_keyboard_bucket,
-                                  org=self.config.influxdb_org, record=point)
-        except Exception as exc:
-            logger.debug(f"InfluxDB keyboard write: {exc}")
-
-    def _influx_write_mouse(self, event: dict):
-        if not self._write_api:
-            return
-        try:
-            ns = int(event.get("timestamp", time.time()) * 1e9)
-            point = (
-                Point("mouse_event")
-                .tag("session_id", event.get("session_id", ""))
-                .tag("device_id", event.get("device_id", ""))
-                .tag("event_type", event.get("event_type", ""))
-                .field("x", float(event.get("x", 0)))
-                .field("y", float(event.get("y", 0)))
-                .field("speed", float(event.get("speed", 0)))
-                .time(ns, WritePrecision.NANOSECONDS)
-            )
-            self._write_api.write(bucket=self.config.influxdb_mouse_bucket,
-                                  org=self.config.influxdb_org, record=point)
-        except Exception as exc:
-            logger.debug(f"InfluxDB mouse write: {exc}")
-
-    def close(self):
+    def close(self) -> None:
         self.end_session()
         if self._influx_client:
+            self._influx_client.close()
+
+    def _close_csv_handles_locked(self) -> None:
+        for handle in self._csv_handles.values():
             try:
-                self._influx_client.close()
+                handle.flush()
+                handle.close()
             except Exception:
                 pass
+        self._csv_handles.clear()
+        self._csv_writers.clear()
+
+    def write_behavior_event(self, event: Dict[str, Any]) -> None:
+        normalized = self._normalize_event(event)
+        self._write_stream("behavior", normalized)
+
+    def write_keyboard_event(self, event: Dict[str, Any]) -> None:
+        normalized = self._normalize_event(event)
+        self._write_stream("keyboard", normalized)
+
+    def write_mouse_event(self, event: Dict[str, Any]) -> None:
+        normalized = self._normalize_event(event)
+        self._write_stream("mouse", normalized)
+
+    def write_labels(self, labels: Dict[str, Any]) -> None:
+        normalized = self._normalize_event(labels)
+        self._write_stream("labels", normalized)
+
+    def _normalize_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(event)
+        payload["timestamp"] = _as_epoch_seconds(payload.get("timestamp"))
+        payload.setdefault("session_id", self._session_id)
+        payload.setdefault("device_id", self._config.device_id)
+        return payload
+
+    def _write_stream(self, stream: str, event: Dict[str, Any]) -> None:
+        self._write_csv(stream, event)
+        self._write_influx(stream, event)
+
+    def _write_csv(self, stream: str, event: Dict[str, Any]) -> None:
+        if not self._config.csv_enabled:
+            return
+        with self._lock:
+            writer = self._csv_writers.get(stream)
+            handle = self._csv_handles.get(stream)
+            if not writer or not handle:
+                return
+
+            row = dict(event)
+            if stream == "behavior":
+                row["extra"] = self._build_behavior_extra(event)
+
+            writer.writerow(row)
+            handle.flush()
+
+    def _build_behavior_extra(self, event: Dict[str, Any]) -> str:
+        known = set(self._CSV_SCHEMAS["behavior"])
+        extras = {
+            key: value
+            for key, value in event.items()
+            if key not in known and value not in ("", None)
+        }
+        if not extras:
+            return ""
+        return json.dumps(extras, ensure_ascii=True, separators=(",", ":"))
+
+    def _write_influx(self, stream: str, event: Dict[str, Any]) -> None:
+        if not self._config.influx_enabled:
+            return
+        if not self._influx_writer or not Point or not WritePrecision:
+            return
+
+        measurement = self._STREAM_TO_MEASUREMENT[stream]
+        bucket_attr = self._STREAM_TO_BUCKET[stream]
+        bucket = getattr(self._config, bucket_attr)
+        timestamp_ns = int(_as_epoch_seconds(event.get("timestamp")) * 1_000_000_000)
+
+        point = Point(measurement)
+        for tag_key in ("session_id", "device_id", "event_type"):
+            tag_value = event.get(tag_key)
+            if tag_value not in (None, ""):
+                point.tag(tag_key, str(tag_value))
+
+        for field_key, field_value in event.items():
+            if field_key in {"timestamp", "session_id", "device_id", "event_type"}:
+                continue
+            if field_value in (None, ""):
+                continue
+            if isinstance(field_value, bool):
+                point.field(field_key, field_value)
+            elif isinstance(field_value, int):
+                point.field(field_key, int(field_value))
+            elif isinstance(field_value, float):
+                point.field(field_key, float(field_value))
+            else:
+                point.field(field_key, str(field_value))
+
+        point.time(timestamp_ns, WritePrecision.NS)
+        self._influx_writer.write(
+            bucket=bucket,
+            org=self._config.influxdb_org,
+            record=point,
+        )

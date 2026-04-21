@@ -1,24 +1,38 @@
-1. Start InfluxDB
+1. Install dependencies
 
-
+```bash
 cd cognitive_system
-docker compose up -d
-2. Install Python deps
-
-
 python setup.py
-3. Start the system agent
+```
 
+2. Start the system agent
 
+```bash
 .venv/Scripts/python system_agent/main.py
-4. Load the extension in Chrome: chrome://extensions → Developer mode → Load unpacked → select browser_agent_v2/
+```
 
-5. Start a session — type s in the terminal. The popup shows live elapsed/remaining time (sourced exclusively from the system agent). At session end, a new browser tab opens with the full questionnaire.
+3. Complete startup configuration in terminal
 
-Key architecture rules enforced:
+- mode
+- duration
+- csv enabled
+- influx enabled
+- dual-task enabled
+- questionnaire enabled
 
-Session timing lives only in session_manager.py — extension never computes it
-Questionnaire opens as a full browser tab (open_questionnaire → chrome.tabs.create)
-One event = one CSV row + one InfluxDB point, written atomically
-Extension state survives service-worker restarts via chrome.storage.session
-Scroll events are accumulated per-tab and flushed only on scroll pause or tab hide
+4. Press Enter to start the session
+
+5. Load the extension
+
+- Open `chrome://extensions`
+- Enable Developer mode
+- Load unpacked: `cognitive_system/browser_agent_v2`
+
+Behavior summary:
+
+- System agent owns session timing
+- Extension only displays elapsed/remaining from agent updates
+- Recording starts/resumes/pauses automatically based on browser foreground
+- In experimental mode, reaction probes appear periodically as clickable squares
+- At session end, questionnaire opens in browser tab and submits to system agent
+

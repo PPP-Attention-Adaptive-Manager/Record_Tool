@@ -1,8 +1,12 @@
-﻿import asyncio
+from __future__ import annotations
+
+import asyncio
 import logging
-import sys
 import os
+import sys
 import time
+import uuid
+from typing import Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,31 +19,31 @@ logging.basicConfig(
         ),
     ],
 )
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from system_agent.config import config, MODE_EXPERIMENTAL
-from system_agent.session_manager import SessionManager, SessionState
+from system_agent.app_tracker import AppSnapshot, AppTracker
+from system_agent.config import RuntimeConfig, build_runtime_config
 from system_agent.data_writer import DataWriter
+from system_agent.dependency_validation import validate_runtime_dependencies
+from system_agent.extension_server import ExtensionServer
 from system_agent.keyboard_tracker import KeyboardTracker
 from system_agent.mouse_tracker import MouseTracker
-from system_agent.extension_server import ExtensionServer
-from system_agent.dual_task import DualTask
+from system_agent.session_manager import SessionManager
 
 
 class CognitiveSystemAgent:
-    """Master controller — single source of truth for session state and timing."""
+    """Master orchestrator for session timing and extension control."""
 
-    def __init__(self):
+    def __init__(self, config: RuntimeConfig):
         self.config = config
-        self.loop: asyncio.AbstractEventLoop = None
-        self.running = False
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
         self.data_writer = DataWriter(config)
         self.session_manager = SessionManager(
-            config=config,
-            broadcast_callback=self._broadcast,
+            mode=config.mode,
+            duration_minutes=config.session_duration_minutes,
         )
         self.extension_server = ExtensionServer(
             config=config,
@@ -47,208 +51,361 @@ class CognitiveSystemAgent:
             on_questionnaire_results=self._handle_questionnaire_results,
             on_heartbeat=self._handle_heartbeat,
         )
-        self.keyboard_tracker = KeyboardTracker(on_event=self._handle_keyboard_event)
+
+        self.keyboard_tracker = KeyboardTracker(
+            on_event=self._handle_keyboard_event,
+            enabled=config.keyboard_tracking_enabled,
+        )
         self.mouse_tracker = MouseTracker(
             on_event=self._handle_mouse_event,
-            aggregation_interval=config.mouse_aggregation_interval,
+            enabled=config.mouse_tracking_enabled,
         )
-        self.dual_task: DualTask = None
-        if config.mode == MODE_EXPERIMENTAL:
-            self.dual_task = DualTask(on_response=self._handle_dual_task_response)
+        self.app_tracker = AppTracker(
+            poll_interval_sec=config.app_poll_interval_seconds,
+            browser_processes=set(config.browser_processes),
+            on_change=self._on_active_app_change,
+        )
+
+        self._browser_foreground = False
+        self._latest_app_snapshot: Optional[AppSnapshot] = None
+
+        self._status_task: Optional[asyncio.Task] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._dual_task_task: Optional[asyncio.Task] = None
+
+        self._session_finished = asyncio.Event()
+        self._awaiting_questionnaire = False
+        self._pending_questionnaire_session_id: Optional[str] = None
+        self._questionnaire_done = asyncio.Event()
 
     # ------------------------------------------------------------------
-    # Broadcast helper
+    # Incoming extension callbacks
     # ------------------------------------------------------------------
 
-    async def _broadcast(self, message: dict):
-        await self.extension_server.broadcast(message)
+    async def _handle_browser_events(self, events: list[dict]) -> None:
+        current_session = self.session_manager.session_id
+        if not current_session:
+            return
 
-    # ------------------------------------------------------------------
-    # Incoming event handlers
-    # ------------------------------------------------------------------
-
-    async def _handle_browser_events(self, events: list):
-        for event in events:
+        for raw in events:
+            if not isinstance(raw, dict):
+                continue
+            event = dict(raw)
+            event.setdefault("timestamp", time.time())
+            event.setdefault("session_id", current_session)
+            if event.get("session_id") != current_session:
+                continue
             self.data_writer.write_behavior_event(event)
 
-    async def _handle_questionnaire_results(self, results: dict):
-        results["timestamp"] = time.time()
-        self.data_writer.write_labels(results)
+    async def _handle_questionnaire_results(self, results: dict) -> None:
+        if not self._awaiting_questionnaire:
+            LOGGER.warning("Ignoring questionnaire payload because no questionnaire is pending.")
+            return
+
+        payload = dict(results)
+        payload.setdefault("timestamp", time.time())
+        payload.setdefault("session_id", self._pending_questionnaire_session_id)
+        payload.setdefault("device_id", self.config.device_id)
+
+        if payload.get("session_id") != self._pending_questionnaire_session_id:
+            LOGGER.warning(
+                "Ignoring questionnaire for unexpected session_id=%s (expected=%s)",
+                payload.get("session_id"),
+                self._pending_questionnaire_session_id,
+            )
+            return
+
+        self.data_writer.write_labels(payload)
         self.data_writer.end_session()
-        logger.info("Questionnaire results saved, session files closed")
-        await self._broadcast({
-            "type": "questionnaire_received",
-            "session_id": self.session_manager.session_id,
-        })
+        self._awaiting_questionnaire = False
+        self._pending_questionnaire_session_id = None
+        self._questionnaire_done.set()
+        LOGGER.info("Questionnaire received and persisted")
 
-    async def _handle_heartbeat(self, data: dict):
-        await self._broadcast({
+    async def _handle_heartbeat(self, _: dict) -> dict:
+        return {
             "type": "heartbeat_ack",
-            **self.session_manager.get_status_dict(),
-        })
+            **self.session_manager.snapshot().to_dict(),
+        }
 
-    def _handle_keyboard_event(self, event: dict):
-        if self.session_manager.state == SessionState.RUNNING:
-            self.data_writer.write_keyboard_event(event)
+    # ------------------------------------------------------------------
+    # Local tracker callbacks
+    # ------------------------------------------------------------------
 
-    def _handle_mouse_event(self, event: dict):
-        if self.session_manager.state == SessionState.RUNNING:
-            self.data_writer.write_mouse_event(event)
+    def _handle_keyboard_event(self, event: dict) -> None:
+        if not self.session_manager.active:
+            return
+        self.data_writer.write_keyboard_event(event)
 
-    def _handle_dual_task_response(self, response: dict):
-        if self.session_manager.state == SessionState.RUNNING:
-            self.data_writer.write_behavior_event(response)
+    def _handle_mouse_event(self, event: dict) -> None:
+        if not self.session_manager.active:
+            return
+        self.data_writer.write_mouse_event(event)
+
+    def _on_active_app_change(self, snapshot: AppSnapshot) -> None:
+        self._latest_app_snapshot = snapshot
+        self._browser_foreground = bool(snapshot.is_browser)
+
+        if self.loop is None:
+            return
+
+        self.loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self._apply_browser_foreground(snapshot))
+        )
+
+    async def _apply_browser_foreground(self, snapshot: AppSnapshot) -> None:
+        if not self.session_manager.active:
+            return
+
+        command = self.session_manager.set_browser_foreground(snapshot.is_browser)
+        self.data_writer.write_behavior_event(
+            {
+                "timestamp": time.time(),
+                "session_id": self.session_manager.session_id,
+                "event_type": "active_app_change",
+                "extra": (
+                    f"process={snapshot.process_name};window={snapshot.window_title};"
+                    f"is_browser={snapshot.is_browser}"
+                ),
+            }
+        )
+
+        if command:
+            await self._send_recording_command(command)
+        await self._broadcast_status()
 
     # ------------------------------------------------------------------
     # Session lifecycle
     # ------------------------------------------------------------------
 
-    async def start_session(self):
-        if self.session_manager.state != SessionState.IDLE:
-            print("[!] A session is already active.")
-            return
+    async def start_session(self) -> None:
+        if self.session_manager.active:
+            raise RuntimeError("Cannot start: session already active.")
 
-        session_id = self.session_manager.start()
+        self._session_finished.clear()
+        self._questionnaire_done.clear()
+        self._awaiting_questionnaire = False
+        self._pending_questionnaire_session_id = None
+
+        session_id = self.session_manager.start_session()
         self.data_writer.start_session(session_id)
+
         self.keyboard_tracker.start()
         self.mouse_tracker.start()
 
-        if self.dual_task:
-            self.dual_task.start()
+        # Apply current browser focus immediately; emits start/resume when foreground.
+        initial_command = self.session_manager.set_browser_foreground(self._browser_foreground)
+        if initial_command:
+            await self._send_recording_command(initial_command)
 
-        await self._broadcast({
-            "type": "start_recording",
-            "session_id": session_id,
-            "mode": self.config.mode,
-            "duration": self.config.session_duration_minutes * 60,
-        })
+        self._status_task = asyncio.create_task(self._status_broadcast_loop(), name="status-broadcast")
+        self._watchdog_task = asyncio.create_task(self._session_watchdog_loop(), name="session-watchdog")
+        if self.config.dual_task_enabled:
+            self._dual_task_task = asyncio.create_task(self._dual_task_loop(), name="dual-task")
 
-        self.session_manager.start_broadcast(self.loop)
-        self.loop.create_task(self._session_watchdog())
+        await self._broadcast_status()
 
-        print(f"\n[SESSION STARTED]  id={session_id}")
-        print(f"  mode     : {self.config.mode.upper()}")
-        print(f"  duration : {self.config.session_duration_minutes} min\n")
+        print("\n[SESSION STARTED]")
+        print(f"  session_id       : {session_id}")
+        print(f"  mode             : {self.config.mode}")
+        print(f"  duration_minutes : {self.config.session_duration_minutes}")
+        print("  recording control: automatic (browser foreground driven)\n")
 
-    async def pause_session(self):
-        if self.session_manager.state != SessionState.RUNNING:
-            print("[!] No running session to pause.")
+    async def stop_session(self, *, reason: str, open_questionnaire: bool = True) -> None:
+        if not self.session_manager.active:
             return
-        self.session_manager.pause()
-        await self._broadcast({"type": "pause_recording"})
-        print("[SESSION PAUSED]")
 
-    async def resume_session(self):
-        if self.session_manager.state != SessionState.PAUSED:
-            print("[!] No paused session to resume.")
-            return
-        self.session_manager.resume()
-        await self._broadcast({"type": "resume_recording"})
-        print("[SESSION RESUMED]")
+        session_id = self.session_manager.session_id
+        LOGGER.info("Stopping session %s reason=%s", session_id, reason)
 
-    async def stop_session(self, trigger_questionnaire: bool = True):
-        if self.session_manager.state not in (SessionState.RUNNING, SessionState.PAUSED):
-            print("[!] No active session to stop.")
-            return
+        await self._cancel_task(self._status_task)
+        self._status_task = None
+        await self._cancel_task(self._watchdog_task)
+        self._watchdog_task = None
+        await self._cancel_task(self._dual_task_task)
+        self._dual_task_task = None
 
         self.keyboard_tracker.stop()
         self.mouse_tracker.stop()
-        if self.dual_task:
-            self.dual_task.stop()
 
-        session_id = self.session_manager.session_id
-        self.session_manager.stop()
-        self.session_manager.stop_broadcast()
+        await self.extension_server.broadcast(
+            {
+                "type": "stop_recording",
+                "session_id": session_id,
+            }
+        )
 
-        await self._broadcast({"type": "stop_recording", "session_id": session_id})
+        self.session_manager.stop_session()
+        await self._broadcast_status()
 
-        if trigger_questionnaire and self.config.mode == MODE_EXPERIMENTAL:
-            await asyncio.sleep(0.3)
-            await self._broadcast({"type": "open_questionnaire", "session_id": session_id})
-            logger.info("Questionnaire triggered — waiting for browser submission")
+        should_open_questionnaire = (
+            open_questionnaire
+            and self.config.is_experimental
+            and self.config.questionnaire_enabled
+            and session_id is not None
+        )
+        if should_open_questionnaire:
+            self._awaiting_questionnaire = True
+            self._pending_questionnaire_session_id = session_id
+            await self.extension_server.broadcast(
+                {
+                    "type": "open_questionnaire",
+                    "session_id": session_id,
+                }
+            )
+            print("Questionnaire opened in browser. Waiting for submission...")
         else:
             self.data_writer.end_session()
 
-        print(f"\n[SESSION STOPPED]  id={session_id}\n")
+        self._session_finished.set()
+        print(f"[SESSION STOPPED] reason={reason}\n")
 
-    async def _session_watchdog(self):
-        while True:
-            state = self.session_manager.state
-            if state not in (SessionState.RUNNING, SessionState.PAUSED):
-                break
+    async def _status_broadcast_loop(self) -> None:
+        while self.session_manager.active:
+            await self._broadcast_status()
+            await asyncio.sleep(self.config.session_broadcast_interval)
+
+    async def _session_watchdog_loop(self) -> None:
+        while self.session_manager.active:
             if self.session_manager.is_expired():
-                logger.info("Session expired — auto-stopping")
-                await self.stop_session()
-                break
-            await asyncio.sleep(1.0)
+                await self.stop_session(reason="duration_expired", open_questionnaire=True)
+                return
+            await asyncio.sleep(0.5)
+
+    async def _dual_task_loop(self) -> None:
+        interval = max(5, self.config.dual_task_interval_seconds)
+        timeout_ms = int(max(1, self.config.dual_task_timeout_seconds) * 1000)
+
+        while self.session_manager.active:
+            await asyncio.sleep(interval)
+            if not self.session_manager.active:
+                return
+            snapshot = self.session_manager.snapshot()
+            if snapshot.state != "running":
+                continue
+
+            probe_id = f"probe_{uuid.uuid4().hex[:8]}"
+            await self.extension_server.broadcast(
+                {
+                    "type": "dual_task_probe",
+                    "session_id": snapshot.session_id,
+                    "probe_id": probe_id,
+                    "timeout_ms": timeout_ms,
+                }
+            )
 
     # ------------------------------------------------------------------
-    # Interactive CLI
+    # Utility helpers
     # ------------------------------------------------------------------
 
-    async def _cli_loop(self):
-        _BANNER = (
-            "\n"
-            "╔══════════════════════════════════════╗\n"
-            "║   Cognitive System Agent  v2.0       ║\n"
-            "╚══════════════════════════════════════╝\n"
-            f"  Mode    : {self.config.mode.upper()}\n"
-            f"  WS      : ws://{self.config.websocket_host}:{self.config.websocket_port}\n"
-            f"  HTTP    : http://{self.config.http_host}:{self.config.http_port}\n"
-            "\n"
-            "  Commands: [s]tart  [p]ause  [r]esume  [e]nd  [status]  [q]uit\n"
+    async def _send_recording_command(self, command: str) -> None:
+        payload = {
+            "type": command,
+            "session_id": self.session_manager.session_id,
+            "mode": self.config.mode,
+            "duration": self.config.session_duration_seconds,
+        }
+        await self.extension_server.broadcast(payload)
+
+    async def _broadcast_status(self) -> None:
+        await self.extension_server.broadcast(
+            {
+                "type": "session_update",
+                **self.session_manager.snapshot().to_dict(),
+            }
         )
-        print(_BANNER)
 
-        while self.running:
-            try:
-                cmd = await self.loop.run_in_executor(None, input, "> ")
-                cmd = cmd.strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                self.running = False
-                break
+    @staticmethod
+    async def _cancel_task(task: Optional[asyncio.Task]) -> None:
+        if not task or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-            if cmd in ("s", "start"):
-                await self.start_session()
-            elif cmd in ("p", "pause"):
-                await self.pause_session()
-            elif cmd in ("r", "resume"):
-                await self.resume_session()
-            elif cmd in ("e", "end", "stop"):
-                await self.stop_session()
-            elif cmd == "status":
-                print(self.session_manager.get_status_dict())
-            elif cmd in ("q", "quit", "exit"):
-                self.running = False
-            else:
-                print("  Unknown command. Use: s p r e status q")
+    async def _wait_for_user_start(self) -> bool:
+        print("Press Enter to start the session, or type 'q' to quit.")
+        raw = await self.loop.run_in_executor(None, input, "> ")
+        return raw.strip().lower() not in {"q", "quit", "exit"}
 
-    # ------------------------------------------------------------------
-    # Entry point
-    # ------------------------------------------------------------------
+    async def _wait_for_questionnaire_if_needed(self) -> None:
+        if not self._awaiting_questionnaire:
+            return
+        try:
+            await asyncio.wait_for(self._questionnaire_done.wait(), timeout=900)
+        except asyncio.TimeoutError:
+            LOGGER.warning("Questionnaire timeout (15 minutes). Closing session files.")
+            self.data_writer.end_session()
+            self._awaiting_questionnaire = False
+            self._pending_questionnaire_session_id = None
 
-    async def run(self):
-        self.loop = asyncio.get_event_loop()
-        self.running = True
+    def _print_banner(self) -> None:
+        print(
+            "\n"
+            "==========================================\n"
+            "   Cognitive System Agent (Orchestrator)\n"
+            "==========================================\n"
+            f"Mode                 : {self.config.mode}\n"
+            f"Session duration     : {self.config.session_duration_minutes} min\n"
+            f"CSV export           : {self.config.csv_enabled}\n"
+            f"Influx export        : {self.config.influx_enabled}\n"
+            f"Dual-task            : {self.config.dual_task_enabled}\n"
+            f"Questionnaire        : {self.config.questionnaire_enabled}\n"
+            f"WebSocket endpoint   : ws://{self.config.websocket_host}:{self.config.websocket_port}\n"
+            f"HTTP endpoint        : http://{self.config.http_host}:{self.config.http_port}\n"
+            f"Data directory       : {self.config.data_dir}\n"
+        )
+
+    async def run(self) -> None:
+        self.loop = asyncio.get_running_loop()
         try:
             await self.extension_server.start()
-            await self._cli_loop()
+            self.app_tracker.start()
+            self._print_banner()
+
+            start = await self._wait_for_user_start()
+            if not start:
+                print("Session not started.")
+                return
+
+            await self.start_session()
+            print("Session running. Recording pauses/resumes automatically with browser foreground.")
+            print("Use Ctrl+C to stop early.\n")
+
+            while not self._session_finished.is_set():
+                await asyncio.sleep(0.5)
+
+            await self._wait_for_questionnaire_if_needed()
         finally:
-            sm = self.session_manager
-            if sm.state in (SessionState.RUNNING, SessionState.PAUSED):
-                await self.stop_session(trigger_questionnaire=False)
+            try:
+                await self.stop_session(reason="shutdown", open_questionnaire=False)
+            except Exception:
+                pass
+            self.app_tracker.stop()
+            self.keyboard_tracker.stop()
+            self.mouse_tracker.stop()
             self.data_writer.close()
             await self.extension_server.stop()
-            logger.info("Cognitive System Agent shut down cleanly")
+            LOGGER.info("System agent shut down cleanly")
 
 
-def main():
-    agent = CognitiveSystemAgent()
+def main(argv: Optional[list[str]] = None) -> None:
+    try:
+        config = build_runtime_config(argv)
+        validate_runtime_dependencies(config)
+    except Exception as exc:
+        print(f"\n[FATAL] {exc}\n")
+        raise SystemExit(1) from exc
+
+    agent = CognitiveSystemAgent(config)
     try:
         asyncio.run(agent.run())
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        print("\nInterrupted by user.")
 
 
 if __name__ == "__main__":
     main()
+

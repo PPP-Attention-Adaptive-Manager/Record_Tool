@@ -11,7 +11,10 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Callable, Optional, Set
 
-import psutil
+try:
+    import psutil
+except ImportError:  # handled by startup validation
+    psutil = None  # type: ignore[assignment]
 
 from shared.time_utils import now_ns
 
@@ -101,6 +104,12 @@ class AppTracker:
         )
 
     def _capture_windows(self) -> AppSnapshot:
+        if psutil is None:
+            raise RuntimeError(
+                "AppTracker requires `psutil` for foreground process detection. "
+                "Install with `pip install psutil`."
+            )
+
         user32 = ctypes.windll.user32
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
@@ -134,4 +143,3 @@ class AppTracker:
             pid=proc_pid,
             is_browser=process_name in self._browser_processes,
         )
-

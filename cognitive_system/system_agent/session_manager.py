@@ -1,118 +1,141 @@
-import uuid
+from __future__ import annotations
+
 import time
-import asyncio
-import logging
+import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Callable
-
-logger = logging.getLogger(__name__)
+from typing import Optional
 
 
-class SessionState(Enum):
-    IDLE = "idle"
+class SessionState(str, Enum):
+    INACTIVE = "inactive"
     RUNNING = "running"
     PAUSED = "paused"
-    ENDED = "ended"
+
+
+@dataclass
+class SessionSnapshot:
+    session_id: Optional[str]
+    mode: str
+    state: str
+    elapsed_time: float
+    remaining_time: float
+    duration: int
+    recording_active: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "mode": self.mode,
+            "state": self.state,
+            "elapsed_time": round(self.elapsed_time, 1),
+            "remaining_time": round(self.remaining_time, 1),
+            "duration": self.duration,
+            "recording_active": self.recording_active,
+        }
 
 
 class SessionManager:
-    def __init__(self, config, broadcast_callback: Callable):
-        self.config = config
-        self.broadcast_callback = broadcast_callback
+    """Single source of truth for session timing and recording state."""
 
-        self.session_id: Optional[str] = None
-        self.state = SessionState.IDLE
-        self.start_time: Optional[float] = None
-        self.pause_time: Optional[float] = None
-        self.paused_duration: float = 0.0
-        self.duration_seconds: float = config.session_duration_minutes * 60.0
+    def __init__(self, mode: str, duration_minutes: int):
+        self._mode = mode
+        self._duration_seconds = max(1, int(duration_minutes * 60))
+        self._session_id: Optional[str] = None
+        self._start_monotonic: Optional[float] = None
+        self._active = False
 
-        self._broadcast_task: Optional[asyncio.Task] = None
+        self._browser_foreground = False
+        self._recording_active = False
+        self._recording_started_once = False
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    @property
+    def session_id(self) -> Optional[str]:
+        return self._session_id
 
-    def start(self) -> str:
-        if self.state != SessionState.IDLE:
-            raise RuntimeError(f"Cannot start: current state is {self.state.value}")
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def start_session(self) -> str:
+        if self._active:
+            raise RuntimeError("Session already active.")
+
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.session_id = f"session_{ts}_{uuid.uuid4().hex[:6]}"
-        self.start_time = time.monotonic()
-        self.paused_duration = 0.0
-        self.pause_time = None
-        self.state = SessionState.RUNNING
-        logger.info(f"Session started: {self.session_id}")
-        return self.session_id
+        self._session_id = f"session_{ts}_{uuid.uuid4().hex[:6]}"
+        self._start_monotonic = time.monotonic()
+        self._active = True
 
-    def pause(self):
-        if self.state != SessionState.RUNNING:
-            raise RuntimeError(f"Cannot pause: current state is {self.state.value}")
-        self.pause_time = time.monotonic()
-        self.state = SessionState.PAUSED
-        logger.info(f"Session paused: {self.session_id}")
+        self._recording_active = False
+        self._recording_started_once = False
+        return self._session_id
 
-    def resume(self):
-        if self.state != SessionState.PAUSED:
-            raise RuntimeError(f"Cannot resume: current state is {self.state.value}")
-        self.paused_duration += time.monotonic() - self.pause_time
-        self.pause_time = None
-        self.state = SessionState.RUNNING
-        logger.info(f"Session resumed: {self.session_id}")
+    def stop_session(self) -> Optional[str]:
+        if not self._active:
+            return None
+        session_id = self._session_id
+        self._active = False
+        self._session_id = None
+        self._start_monotonic = None
+        self._recording_active = False
+        self._recording_started_once = False
+        return session_id
 
-    def stop(self):
-        if self.state not in (SessionState.RUNNING, SessionState.PAUSED):
-            raise RuntimeError(f"Cannot stop: current state is {self.state.value}")
-        self.state = SessionState.ENDED
-        logger.info(f"Session ended: {self.session_id}")
+    def set_browser_foreground(self, is_foreground: bool) -> Optional[str]:
+        """
+        Update browser foreground status.
+        Returns an extension command when recording state must change:
+        start_recording / resume_recording / pause_recording.
+        """
+        self._browser_foreground = bool(is_foreground)
+        if not self._active:
+            return None
 
-    # ------------------------------------------------------------------
-    # Timing helpers (single source of truth)
-    # ------------------------------------------------------------------
+        if self._browser_foreground and not self._recording_active:
+            self._recording_active = True
+            if not self._recording_started_once:
+                self._recording_started_once = True
+                return "start_recording"
+            return "resume_recording"
+
+        if not self._browser_foreground and self._recording_active:
+            self._recording_active = False
+            return "pause_recording"
+
+        return None
 
     def get_elapsed(self) -> float:
-        if self.start_time is None:
+        if not self._active or self._start_monotonic is None:
             return 0.0
-        now = time.monotonic()
-        if self.state == SessionState.PAUSED:
-            active = self.pause_time - self.start_time - self.paused_duration
-        else:
-            active = now - self.start_time - self.paused_duration
-        return max(0.0, active)
+        return max(0.0, time.monotonic() - self._start_monotonic)
 
     def get_remaining(self) -> float:
-        return max(0.0, self.duration_seconds - self.get_elapsed())
+        return max(0.0, self._duration_seconds - self.get_elapsed())
 
     def is_expired(self) -> bool:
-        return self.state == SessionState.RUNNING and self.get_remaining() <= 0.0
+        return self._active and self.get_elapsed() >= self._duration_seconds
 
-    def get_status_dict(self) -> dict:
-        return {
-            "session_id": self.session_id,
-            "state": self.state.value,
-            "elapsed_time": round(self.get_elapsed(), 1),
-            "remaining_time": round(self.get_remaining(), 1),
-            "duration": self.duration_seconds,
-        }
+    def snapshot(self) -> SessionSnapshot:
+        if not self._active:
+            return SessionSnapshot(
+                session_id=None,
+                mode=self._mode,
+                state=SessionState.INACTIVE.value,
+                elapsed_time=0.0,
+                remaining_time=0.0,
+                duration=self._duration_seconds,
+                recording_active=False,
+            )
 
-    # ------------------------------------------------------------------
-    # Broadcast loop (sends session_update to extension every second)
-    # ------------------------------------------------------------------
+        state = SessionState.RUNNING.value if self._recording_active else SessionState.PAUSED.value
+        return SessionSnapshot(
+            session_id=self._session_id,
+            mode=self._mode,
+            state=state,
+            elapsed_time=self.get_elapsed(),
+            remaining_time=self.get_remaining(),
+            duration=self._duration_seconds,
+            recording_active=self._recording_active,
+        )
 
-    async def _broadcast_loop(self):
-        while True:
-            if self.state in (SessionState.RUNNING, SessionState.PAUSED):
-                await self.broadcast_callback({
-                    "type": "session_update",
-                    **self.get_status_dict(),
-                })
-            await asyncio.sleep(self.config.session_broadcast_interval)
-
-    def start_broadcast(self, loop: asyncio.AbstractEventLoop):
-        self._broadcast_task = loop.create_task(self._broadcast_loop())
-
-    def stop_broadcast(self):
-        if self._broadcast_task and not self._broadcast_task.done():
-            self._broadcast_task.cancel()
-        self._broadcast_task = None

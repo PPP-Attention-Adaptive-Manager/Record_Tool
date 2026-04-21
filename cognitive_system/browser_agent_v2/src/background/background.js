@@ -1,75 +1,92 @@
-﻿import { SYSTEM_AGENT_WS, STATES, MSG, EV, CFG } from "../shared/constants.js";
+import {
+  CFG,
+  EVENT_TYPE,
+  MSG,
+  SESSION_STATE,
+  SYSTEM_AGENT_HTTP,
+  SYSTEM_AGENT_WS,
+} from "../shared/constants.js";
 import { nowSec } from "../shared/utils.js";
 
-// ---------------------------------------------------------------------------
-// State (lives in service-worker memory; survives for the session duration)
-// ---------------------------------------------------------------------------
+function defaultSessionStatus() {
+  return {
+    session_id: null,
+    mode: null,
+    state: SESSION_STATE.INACTIVE,
+    elapsed_time: 0,
+    remaining_time: 0,
+    duration: 0,
+    recording_active: false,
+  };
+}
 
-let state = STATES.IDLE;
-let sessionInfo = {
-  session_id: null,
-  elapsed_time: 0,
-  remaining_time: 0,
-  duration: 0,
-  state: STATES.IDLE,
-};
+let sessionStatus = defaultSessionStatus();
+let recordingActive = false;
+let connectionOnline = false;
+let eventBuffer = [];
 let deviceId = null;
 let ws = null;
-let eventBuffer = [];
 let reconnectTimer = null;
-
-// ---------------------------------------------------------------------------
-// Device ID (persisted across extension restarts)
-// ---------------------------------------------------------------------------
 
 async function ensureDeviceId() {
   if (deviceId) return deviceId;
   const stored = await chrome.storage.local.get("device_id");
   if (stored.device_id) {
     deviceId = stored.device_id;
-  } else {
-    deviceId = "browser_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    await chrome.storage.local.set({ device_id: deviceId });
+    return deviceId;
   }
+  deviceId =
+    "browser_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  await chrome.storage.local.set({ device_id: deviceId });
   return deviceId;
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket connection
-// ---------------------------------------------------------------------------
-
-function connectWS() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-
+async function restoreState() {
   try {
-    ws = new WebSocket(SYSTEM_AGENT_WS);
+    const stored = await chrome.storage.session.get("collectorState");
+    if (!stored.collectorState) return;
+    if (stored.collectorState.sessionStatus) {
+      sessionStatus = { ...defaultSessionStatus(), ...stored.collectorState.sessionStatus };
+    }
+    if (typeof stored.collectorState.recordingActive === "boolean") {
+      recordingActive = stored.collectorState.recordingActive;
+    }
+    if (typeof stored.collectorState.connectionOnline === "boolean") {
+      connectionOnline = stored.collectorState.connectionOnline;
+    }
+  } catch (_) {}
+}
 
-    ws.onopen = () => {
-      console.log("[BG] WebSocket connected to system agent");
-      clearTimeout(reconnectTimer);
-      sendHeartbeat();
-    };
+function persistState() {
+  chrome.storage.session
+    .set({
+      collectorState: {
+        sessionStatus,
+        recordingActive,
+        connectionOnline,
+      },
+    })
+    .catch(() => {});
+}
 
-    ws.onmessage = (ev) => {
-      try {
-        handleSystemMsg(JSON.parse(ev.data));
-      } catch (e) {
-        console.warn("[BG] Bad JSON:", e);
-      }
-    };
+function notifyPopup() {
+  chrome.runtime
+    .sendMessage({
+      type: "session_snapshot",
+      sessionStatus,
+      recordingActive,
+      connectionOnline,
+      deviceId,
+    })
+    .catch(() => {});
+}
 
-    ws.onclose = () => {
-      console.log("[BG] WebSocket closed — will retry");
-      scheduleReconnect();
-    };
-
-    ws.onerror = () => {
-      // error fires before close; close handles retry
-    };
-  } catch (e) {
-    console.warn("[BG] WebSocket creation failed:", e);
-    scheduleReconnect();
+function sendWS(payload) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+    return true;
   }
+  return false;
 }
 
 function scheduleReconnect() {
@@ -77,245 +94,361 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(connectWS, CFG.RECONNECT_MS);
 }
 
-function sendWS(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-    return true;
+function connectWS() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
   }
-  return false;
+  try {
+    ws = new WebSocket(SYSTEM_AGENT_WS);
+    ws.onopen = () => {
+      connectionOnline = true;
+      persistState();
+      notifyPopup();
+      sendHeartbeat();
+    };
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleSystemMessage(msg);
+      } catch (error) {
+        console.warn("[BG] invalid system message", error);
+      }
+    };
+    ws.onclose = () => {
+      connectionOnline = false;
+      persistState();
+      notifyPopup();
+      scheduleReconnect();
+    };
+    ws.onerror = () => {};
+  } catch (error) {
+    connectionOnline = false;
+    persistState();
+    notifyPopup();
+    scheduleReconnect();
+  }
 }
-
-// ---------------------------------------------------------------------------
-// Heartbeat
-// ---------------------------------------------------------------------------
 
 function sendHeartbeat() {
-  sendWS({ type: MSG.HEARTBEAT, device_id: deviceId, timestamp: nowSec() });
-}
-
-// Keep-alive via chrome.alarms (MV3 service worker may sleep)
-chrome.alarms.create(CFG.ALARM_HEARTBEAT, { periodInMinutes: 0.16 }); // ~10 s
-
-// ---------------------------------------------------------------------------
-// Dispatch incoming system-agent messages
-// ---------------------------------------------------------------------------
-
-function handleSystemMsg(msg) {
-  switch (msg.type) {
-    case MSG.START_RECORDING:
-      state = STATES.RECORDING;
-      sessionInfo = {
-        session_id: msg.session_id,
-        duration: msg.duration || 0,
-        elapsed_time: 0,
-        remaining_time: msg.duration || 0,
-        state: STATES.RECORDING,
-      };
-      persistState();
-      notifyPopup({ type: "state_change", state, sessionInfo });
-      break;
-
-    case MSG.PAUSE_RECORDING:
-      state = STATES.PAUSED;
-      sessionInfo.state = STATES.PAUSED;
-      persistState();
-      notifyPopup({ type: "state_change", state, sessionInfo });
-      break;
-
-    case MSG.RESUME_RECORDING:
-      state = STATES.RECORDING;
-      sessionInfo.state = STATES.RECORDING;
-      persistState();
-      notifyPopup({ type: "state_change", state, sessionInfo });
-      break;
-
-    case MSG.STOP_RECORDING:
-      state = STATES.IDLE;
-      flushEvents();
-      clearSessionInfo();
-      persistState();
-      notifyPopup({ type: "state_change", state, sessionInfo });
-      break;
-
-    case MSG.SESSION_UPDATE:
-    case MSG.HEARTBEAT_ACK:
-      sessionInfo = { ...sessionInfo, ...msg };
-      state = msg.state || state;
-      persistState();
-      notifyPopup({ type: "session_update", sessionInfo });
-      break;
-
-    case MSG.OPEN_QUESTIONNAIRE:
-      openQuestionnaire(msg.session_id);
-      break;
-
-    case MSG.SESSION_EXPIRED:
-      state = STATES.IDLE;
-      clearSessionInfo();
-      persistState();
-      notifyPopup({ type: "state_change", state, sessionInfo });
-      break;
-
-    default:
-      break;
-  }
-}
-
-function clearSessionInfo() {
-  sessionInfo = { session_id: null, elapsed_time: 0, remaining_time: 0, duration: 0, state: STATES.IDLE };
-}
-
-function persistState() {
-  chrome.storage.session.set({ cogState: { state, sessionInfo } }).catch(() => {});
-}
-
-// ---------------------------------------------------------------------------
-// Notify popup (if open)
-// ---------------------------------------------------------------------------
-
-function notifyPopup(msg) {
-  chrome.runtime.sendMessage(msg).catch(() => {});
-}
-
-// ---------------------------------------------------------------------------
-// Event recording
-// ---------------------------------------------------------------------------
-
-function record(obj) {
-  if (state !== STATES.RECORDING) return;
-  obj.timestamp   = nowSec();
-  obj.session_id  = sessionInfo.session_id;
-  obj.device_id   = deviceId;
-  eventBuffer.push(obj);
-}
-
-function flushEvents() {
-  if (eventBuffer.length === 0) return;
-  const batch = eventBuffer.splice(0);
   sendWS({
-    type:       MSG.BROWSER_EVENT_BATCH,
-    events:     batch,
-    session_id: sessionInfo.session_id,
-    device_id:  deviceId,
+    type: MSG.HEARTBEAT,
+    device_id: deviceId,
+    extension_timestamp_ms: Date.now(),
   });
 }
 
-// ---------------------------------------------------------------------------
-// Tab listeners
-// ---------------------------------------------------------------------------
+function mergeSessionStatus(payload) {
+  sessionStatus = {
+    ...sessionStatus,
+    ...payload,
+  };
+  if (typeof payload.recording_active === "boolean") {
+    recordingActive = payload.recording_active;
+  }
+  sessionStatus.recording_active = recordingActive;
+}
+
+function applyInactiveState() {
+  sessionStatus = defaultSessionStatus();
+  recordingActive = false;
+}
+
+function handleSystemMessage(msg) {
+  switch (msg.type) {
+    case MSG.START_RECORDING:
+      mergeSessionStatus({
+        session_id: msg.session_id,
+        mode: msg.mode ?? sessionStatus.mode,
+        duration: msg.duration ?? sessionStatus.duration,
+        state: SESSION_STATE.RUNNING,
+        recording_active: true,
+      });
+      break;
+    case MSG.RESUME_RECORDING:
+      mergeSessionStatus({
+        state: SESSION_STATE.RUNNING,
+        recording_active: true,
+      });
+      break;
+    case MSG.PAUSE_RECORDING:
+      mergeSessionStatus({
+        state: SESSION_STATE.PAUSED,
+        recording_active: false,
+      });
+      flushEvents();
+      break;
+    case MSG.STOP_RECORDING:
+      flushEvents();
+      applyInactiveState();
+      break;
+    case MSG.SESSION_UPDATE:
+    case MSG.HEARTBEAT_ACK:
+      mergeSessionStatus({
+        session_id: msg.session_id ?? sessionStatus.session_id,
+        mode: msg.mode ?? sessionStatus.mode,
+        state: msg.state ?? sessionStatus.state,
+        elapsed_time: msg.elapsed_time ?? sessionStatus.elapsed_time,
+        remaining_time: msg.remaining_time ?? sessionStatus.remaining_time,
+        duration: msg.duration ?? sessionStatus.duration,
+        recording_active:
+          typeof msg.recording_active === "boolean"
+            ? msg.recording_active
+            : recordingActive,
+      });
+      break;
+    case MSG.OPEN_QUESTIONNAIRE:
+      openQuestionnaire(msg.session_id);
+      break;
+    case MSG.DUAL_TASK_PROBE:
+      triggerDualTaskProbe(msg);
+      break;
+    default:
+      break;
+  }
+
+  persistState();
+  notifyPopup();
+}
+
+function enqueueEvent(event, options = {}) {
+  const force = Boolean(options.force);
+  if (!sessionStatus.session_id) return;
+  if (!force && !recordingActive) return;
+
+  eventBuffer.push({
+    timestamp: nowSec(),
+    session_id: sessionStatus.session_id,
+    device_id: deviceId,
+    ...event,
+  });
+}
+
+function flushEvents() {
+  if (!eventBuffer.length || !sessionStatus.session_id) return;
+  const batch = eventBuffer.splice(0, eventBuffer.length);
+  const ok = sendWS({
+    type: MSG.BROWSER_EVENT_BATCH,
+    session_id: sessionStatus.session_id,
+    device_id: deviceId,
+    events: batch,
+  });
+  if (!ok) {
+    eventBuffer = batch.concat(eventBuffer);
+  }
+}
+
+async function triggerDualTaskProbe(msg) {
+  if (!sessionStatus.session_id) return;
+  const probeId = msg.probe_id || "";
+  const timeoutMs = Number(msg.timeout_ms || 3000);
+  try {
+    const tabs = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true,
+    });
+    const activeTab = tabs[0];
+    if (!activeTab || activeTab.id == null) {
+      enqueueEvent(
+        {
+          event_type: EVENT_TYPE.DUAL_TASK,
+          probe_id: probeId,
+          reaction_time_ms: 0,
+          miss: true,
+          error: true,
+          extra: "no_active_tab",
+        },
+        { force: true }
+      );
+      flushEvents();
+      return;
+    }
+
+    const response = await chrome.tabs.sendMessage(activeTab.id, {
+      type: "show_dual_task_probe",
+      probe_id: probeId,
+      timeout_ms: timeoutMs,
+    });
+
+    if (!response || response.ok !== true) {
+      enqueueEvent(
+        {
+          event_type: EVENT_TYPE.DUAL_TASK,
+          probe_id: probeId,
+          reaction_time_ms: 0,
+          miss: true,
+          error: true,
+          extra: response?.reason || "probe_rejected",
+        },
+        { force: true }
+      );
+      flushEvents();
+    }
+  } catch (_) {
+    enqueueEvent(
+      {
+        event_type: EVENT_TYPE.DUAL_TASK,
+        probe_id: probeId,
+        reaction_time_ms: 0,
+        miss: true,
+        error: true,
+        extra: "probe_dispatch_failed",
+      },
+      { force: true }
+    );
+    flushEvents();
+  }
+}
+
+function openQuestionnaire(sessionId) {
+  const safeSession = encodeURIComponent(sessionId || "");
+  const url = chrome.runtime.getURL(
+    `src/questionnaire/questionnaire.html?session_id=${safeSession}`
+  );
+  chrome.tabs.create({ url });
+}
 
 chrome.tabs.onCreated.addListener((tab) => {
-  record({ event_type: EV.NEW_TAB, tab_id: String(tab.id), url: tab.url || "", title: tab.title || "" });
+  enqueueEvent({
+    event_type: EVENT_TYPE.NEW_TAB,
+    tab_id: String(tab.id || ""),
+    url: tab.url || "",
+    title: tab.title || "",
+  });
 });
 
 chrome.tabs.onActivated.addListener(async (info) => {
   try {
     const tab = await chrome.tabs.get(info.tabId);
-    record({ event_type: EV.TAB_SWITCH, tab_id: String(tab.id), url: tab.url || "", title: tab.title || "" });
+    enqueueEvent({
+      event_type: EVENT_TYPE.TAB_SWITCH,
+      tab_id: String(tab.id || ""),
+      url: tab.url || "",
+      title: tab.title || "",
+    });
   } catch (_) {}
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  record({ event_type: EV.TAB_CLOSE, tab_id: String(tabId), url: "", title: "" });
+  enqueueEvent({
+    event_type: EVENT_TYPE.TAB_CLOSE,
+    tab_id: String(tabId),
+  });
 });
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (info.status === "complete" && tab.active) {
-    record({ event_type: EV.NAVIGATION, tab_id: String(tabId), url: tab.url || "", title: tab.title || "" });
+  if (info.status !== "complete" || !tab.active) return;
+  enqueueEvent({
+    event_type: EVENT_TYPE.NAVIGATION,
+    tab_id: String(tabId),
+    url: tab.url || "",
+    title: tab.title || "",
+  });
+});
+
+chrome.idle.setDetectionInterval(30);
+chrome.idle.onStateChanged.addListener((state) => {
+  if (state === "active") {
+    enqueueEvent({ event_type: EVENT_TYPE.ACTIVE });
+  } else if (state === "idle") {
+    enqueueEvent({ event_type: EVENT_TYPE.IDLE });
   }
 });
 
-// ---------------------------------------------------------------------------
-// Idle detection
-// ---------------------------------------------------------------------------
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "scroll_event") {
+    enqueueEvent({
+      event_type: EVENT_TYPE.SCROLL,
+      tab_id: String(sender.tab?.id || ""),
+      url: sender.tab?.url || "",
+      scroll_delta_y: message.scroll_delta_y || 0,
+      scroll_total_y: message.scroll_total_y || 0,
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
 
-chrome.idle.setDetectionInterval(30);
-chrome.idle.onStateChanged.addListener((s) => {
-  if      (s === "idle")   record({ event_type: EV.IDLE });
-  else if (s === "active") record({ event_type: EV.ACTIVE });
+  if (message.type === "tab_hidden") {
+    enqueueEvent({
+      event_type: EVENT_TYPE.TAB_HIDDEN,
+      tab_id: String(sender.tab?.id || ""),
+      url: sender.tab?.url || "",
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "dual_task_result") {
+    enqueueEvent(
+      {
+        event_type: EVENT_TYPE.DUAL_TASK,
+        ...message.event,
+      },
+      { force: true }
+    );
+    flushEvents();
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "questionnaire_submit") {
+    const payload = {
+      type: MSG.QUESTIONNAIRE_RESULTS,
+      results: {
+        ...message.results,
+        session_id: message.results?.session_id || sessionStatus.session_id,
+        device_id: deviceId,
+        timestamp: nowSec(),
+      },
+    };
+
+    const sent = sendWS(payload);
+    if (!sent) {
+      fetch(`${SYSTEM_AGENT_HTTP}/questionnaire`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload.results),
+      }).catch(() => {});
+    }
+
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "get_state") {
+    sendResponse({
+      sessionStatus,
+      recordingActive,
+      connectionOnline,
+      deviceId,
+    });
+    return true;
+  }
+
+  return false;
 });
 
-// ---------------------------------------------------------------------------
-// Alarm handler (batch flush + heartbeat keepalive)
-// ---------------------------------------------------------------------------
-
-chrome.alarms.create(CFG.ALARM_BATCH, { periodInMinutes: CFG.BATCH_FLUSH_MS / 60_000 });
+chrome.alarms.create(CFG.ALARM_HEARTBEAT, {
+  periodInMinutes: CFG.HEARTBEAT_INTERVAL_MINUTES,
+});
+chrome.alarms.create(CFG.ALARM_FLUSH, {
+  periodInMinutes: CFG.FLUSH_INTERVAL_MINUTES,
+});
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === CFG.ALARM_BATCH) {
-    flushEvents();
-  } else if (alarm.name === CFG.ALARM_HEARTBEAT) {
+  if (alarm.name === CFG.ALARM_HEARTBEAT) {
     sendHeartbeat();
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       connectWS();
     }
+  } else if (alarm.name === CFG.ALARM_FLUSH) {
+    flushEvents();
   }
 });
-
-// ---------------------------------------------------------------------------
-// Messages from content scripts and popup
-// ---------------------------------------------------------------------------
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "scroll_event") {
-    record({
-      event_type:     EV.SCROLL,
-      tab_id:         String(sender.tab?.id || ""),
-      url:            sender.tab?.url || "",
-      scroll_delta_y: msg.scroll_delta_y || 0,
-      scroll_total_y: msg.scroll_total_y || 0,
-    });
-    sendResponse({ ok: true });
-  }
-  else if (msg.type === "tab_hidden") {
-    record({
-      event_type: EV.TAB_HIDDEN,
-      tab_id:     String(sender.tab?.id || ""),
-      url:        sender.tab?.url || "",
-    });
-    sendResponse({ ok: true });
-  }
-  else if (msg.type === "get_state") {
-    sendResponse({ state, sessionInfo, deviceId });
-  }
-  else if (msg.type === "questionnaire_submit") {
-    sendWS({
-      type: MSG.QUESTIONNAIRE_RESULTS,
-      results: {
-        ...msg.results,
-        session_id: sessionInfo.session_id,
-        device_id:  deviceId,
-        timestamp:  nowSec(),
-      },
-    });
-    sendResponse({ ok: true });
-  }
-  return true;
-});
-
-// ---------------------------------------------------------------------------
-// Questionnaire tab
-// ---------------------------------------------------------------------------
-
-function openQuestionnaire(sessionId) {
-  const url = chrome.runtime.getURL(
-    `src/questionnaire/questionnaire.html?session_id=${encodeURIComponent(sessionId || "")}`
-  );
-  chrome.tabs.create({ url });
-}
-
-// ---------------------------------------------------------------------------
-// Startup
-// ---------------------------------------------------------------------------
 
 (async () => {
   await ensureDeviceId();
-  // Restore session state if service worker restarted mid-session
-  const stored = await chrome.storage.session.get("cogState");
-  if (stored.cogState) {
-    state       = stored.cogState.state || STATES.IDLE;
-    sessionInfo = stored.cogState.sessionInfo || sessionInfo;
-  }
+  await restoreState();
+  notifyPopup();
   connectWS();
-  console.log("[BG] Cognitive Behavior Collector initialized — device:", deviceId);
 })();
+

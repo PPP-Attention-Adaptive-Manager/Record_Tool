@@ -1,47 +1,45 @@
-﻿export const SYSTEM_AGENT_WS   = "ws://localhost:8765";
+export const SYSTEM_AGENT_WS = "ws://localhost:8765";
 export const SYSTEM_AGENT_HTTP = "http://localhost:8080";
 
-export const STATES = Object.freeze({
-  IDLE:      "idle",
-  RECORDING: "recording",
-  PAUSED:    "paused",
+export const SESSION_STATE = Object.freeze({
+  INACTIVE: "inactive",
+  RUNNING: "running",
+  PAUSED: "paused",
 });
 
 export const MSG = Object.freeze({
-  // System -> Extension
-  START_RECORDING:        "start_recording",
-  PAUSE_RECORDING:        "pause_recording",
-  RESUME_RECORDING:       "resume_recording",
-  STOP_RECORDING:         "stop_recording",
-  SESSION_UPDATE:         "session_update",
-  OPEN_QUESTIONNAIRE:     "open_questionnaire",
-  HEARTBEAT_ACK:          "heartbeat_ack",
+  START_RECORDING: "start_recording",
+  RESUME_RECORDING: "resume_recording",
+  PAUSE_RECORDING: "pause_recording",
+  STOP_RECORDING: "stop_recording",
+  SESSION_UPDATE: "session_update",
+  HEARTBEAT_ACK: "heartbeat_ack",
+  OPEN_QUESTIONNAIRE: "open_questionnaire",
+  DUAL_TASK_PROBE: "dual_task_probe",
   QUESTIONNAIRE_RECEIVED: "questionnaire_received",
-  SESSION_EXPIRED:        "session_expired",
 
-  // Extension -> System
-  BROWSER_EVENT_BATCH:    "browser_event_batch",
-  QUESTIONNAIRE_RESULTS:  "questionnaire_results",
-  HEARTBEAT:              "heartbeat",
+  HEARTBEAT: "heartbeat",
+  BROWSER_EVENT_BATCH: "browser_event_batch",
+  QUESTIONNAIRE_RESULTS: "questionnaire_results",
 });
 
-export const EV = Object.freeze({
-  NEW_TAB:    "new_tab",
+export const EVENT_TYPE = Object.freeze({
+  NEW_TAB: "new_tab",
   TAB_SWITCH: "tab_switch",
-  TAB_CLOSE:  "tab_close",
+  TAB_CLOSE: "tab_close",
   TAB_HIDDEN: "tab_hidden",
-  SCROLL:     "scroll",
   NAVIGATION: "navigation",
-  IDLE:       "idle",
-  ACTIVE:     "active",
-  FOCUS:      "focus",
+  SCROLL: "scroll",
+  IDLE: "idle",
+  ACTIVE: "active",
+  DUAL_TASK: "dual_task",
 });
 
 export const CFG = Object.freeze({
-  SCROLL_FLUSH_MS:  2_000,
-  BATCH_FLUSH_MS:   5_000,
-  HEARTBEAT_MS:    10_000,
-  RECONNECT_MS:     3_000,
-  ALARM_BATCH:     "batch_flush",
+  HEARTBEAT_INTERVAL_MINUTES: 0.16, // ~10s
+  FLUSH_INTERVAL_MINUTES: 0.08, // ~5s
+  RECONNECT_MS: 3000,
   ALARM_HEARTBEAT: "heartbeat",
+  ALARM_FLUSH: "flush_events",
 });
+
