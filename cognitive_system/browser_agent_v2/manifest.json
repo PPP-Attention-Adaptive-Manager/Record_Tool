@@ -1,0 +1,39 @@
+﻿{
+  "manifest_version": 3,
+  "name": "Cognitive Behavior Collector",
+  "version": "2.0.0",
+  "description": "Synchronized cognitive behavior data collection for research sessions.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms",
+    "scripting",
+    "idle",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://localhost:8080/*"
+  ],
+  "background": {
+    "service_worker": "src/background/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/content.js"],
+      "run_at": "document_idle",
+      "exclude_matches": ["chrome-extension://*/*", "chrome://*/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "Cognitive Collector"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["src/questionnaire/questionnaire.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

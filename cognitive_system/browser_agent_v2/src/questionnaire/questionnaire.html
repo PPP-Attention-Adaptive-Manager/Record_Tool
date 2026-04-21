@@ -1,0 +1,234 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Session Questionnaire</title>
+  <link rel="stylesheet" href="questionnaire.css" />
+</head>
+<body>
+  <div class="app">
+
+    <header class="q-header">
+      <div class="q-logo">&#9679; Cognitive Collector</div>
+      <h1 class="q-title">Post-Session Questionnaire</h1>
+      <p class="q-subtitle">Please rate your experience during the just-completed session.</p>
+      <div id="session-badge" class="session-badge"></div>
+    </header>
+
+    <form id="q-form" novalidate>
+
+      <!-- ══════════════ NASA-TLX ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">
+          <span class="section-icon">&#128200;</span> NASA Task Load Index
+        </h2>
+        <p class="section-desc">
+          Rate each dimension on a scale from <strong>0</strong> (Very Low) to
+          <strong>100</strong> (Very High).
+        </p>
+
+        <div class="scale-group">
+
+          <div class="scale-item" id="si-mental_demand">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Mental Demand</div>
+                <div class="scale-desc">How much mental and perceptual activity was required?</div>
+              </div>
+              <div class="scale-val-badge" id="val-mental_demand">50</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">Very Low</span>
+              <input type="range" class="slider" id="mental_demand" name="mental_demand"
+                     min="0" max="100" step="1" value="50" />
+              <span class="slider-label-right">Very High</span>
+            </div>
+          </div>
+
+          <div class="scale-item" id="si-physical_demand">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Physical Demand</div>
+                <div class="scale-desc">How much physical activity was required?</div>
+              </div>
+              <div class="scale-val-badge" id="val-physical_demand">50</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">Very Low</span>
+              <input type="range" class="slider" id="physical_demand" name="physical_demand"
+                     min="0" max="100" step="1" value="50" />
+              <span class="slider-label-right">Very High</span>
+            </div>
+          </div>
+
+          <div class="scale-item" id="si-temporal_demand">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Temporal Demand</div>
+                <div class="scale-desc">How hurried or rushed was the pace of the task?</div>
+              </div>
+              <div class="scale-val-badge" id="val-temporal_demand">50</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">Very Low</span>
+              <input type="range" class="slider" id="temporal_demand" name="temporal_demand"
+                     min="0" max="100" step="1" value="50" />
+              <span class="slider-label-right">Very High</span>
+            </div>
+          </div>
+
+          <div class="scale-item" id="si-performance">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Performance</div>
+                <div class="scale-desc">How successful were you in accomplishing the task goals?</div>
+              </div>
+              <div class="scale-val-badge" id="val-performance">50</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">Perfect</span>
+              <input type="range" class="slider" id="performance" name="performance"
+                     min="0" max="100" step="1" value="50" />
+              <span class="slider-label-right">Failure</span>
+            </div>
+          </div>
+
+          <div class="scale-item" id="si-effort">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Effort</div>
+                <div class="scale-desc">How hard did you have to work to achieve your performance?</div>
+              </div>
+              <div class="scale-val-badge" id="val-effort">50</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">Very Low</span>
+              <input type="range" class="slider" id="effort" name="effort"
+                     min="0" max="100" step="1" value="50" />
+              <span class="slider-label-right">Very High</span>
+            </div>
+          </div>
+
+          <div class="scale-item" id="si-frustration">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Frustration</div>
+                <div class="scale-desc">How insecure, discouraged, irritated, or annoyed were you?</div>
+              </div>
+              <div class="scale-val-badge" id="val-frustration">50</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">Very Low</span>
+              <input type="range" class="slider" id="frustration" name="frustration"
+                     min="0" max="100" step="1" value="50" />
+              <span class="slider-label-right">Very High</span>
+            </div>
+          </div>
+
+        </div><!-- /scale-group -->
+      </section>
+
+      <!-- ══════════════ STRESS ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">
+          <span class="section-icon">&#128161;</span> Stress Self-Report
+        </h2>
+
+        <div class="scale-group">
+          <div class="scale-item" id="si-stress_self_report">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Perceived Stress Level</div>
+                <div class="scale-desc">Overall stress experienced during this session.</div>
+              </div>
+              <div class="scale-val-badge" id="val-stress_self_report">5</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">Not at all (0)</span>
+              <input type="range" class="slider" id="stress_self_report" name="stress_self_report"
+                     min="0" max="10" step="1" value="5" />
+              <span class="slider-label-right">Extreme (10)</span>
+            </div>
+            <div class="stress-labels">
+              <span>0</span><span>1</span><span>2</span><span>3</span><span>4</span>
+              <span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>10</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ EMOTION ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">
+          <span class="section-icon">&#128512;</span> Emotional State
+        </h2>
+
+        <div class="scale-group">
+
+          <div class="scale-item" id="si-valence">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Valence</div>
+                <div class="scale-desc">How positive or negative did you feel?</div>
+              </div>
+              <div class="scale-val-badge" id="val-valence">5</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">&#128542; Very Negative</span>
+              <input type="range" class="slider" id="valence" name="valence"
+                     min="1" max="9" step="1" value="5" />
+              <span class="slider-label-right">Very Positive &#128516;</span>
+            </div>
+          </div>
+
+          <div class="scale-item" id="si-arousal">
+            <div class="scale-header">
+              <div>
+                <div class="scale-name">Arousal</div>
+                <div class="scale-desc">How activated or calm did you feel?</div>
+              </div>
+              <div class="scale-val-badge" id="val-arousal">5</div>
+            </div>
+            <div class="slider-row">
+              <span class="slider-label-left">&#128564; Very Calm</span>
+              <input type="range" class="slider" id="arousal" name="arousal"
+                     min="1" max="9" step="1" value="5" />
+              <span class="slider-label-right">Very Excited &#9889;</span>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ══════════════ NOTES ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">
+          <span class="section-icon">&#128196;</span> Additional Notes
+          <span class="optional-tag">optional</span>
+        </h2>
+        <textarea id="notes" name="notes" class="notes-textarea"
+                  placeholder="Anything unusual that happened during this session?"></textarea>
+      </section>
+
+      <!-- Submit -->
+      <div class="submit-wrap">
+        <button type="submit" id="submit-btn" class="submit-btn">
+          Submit &amp; Close
+        </button>
+      </div>
+
+    </form>
+
+    <!-- Confirmation screen -->
+    <div id="confirmation" class="confirmation hidden">
+      <div class="confirm-icon">&#10003;</div>
+      <h2 class="confirm-title">Responses Submitted</h2>
+      <p class="confirm-msg">Your session data has been saved. This tab will close in a moment.</p>
+    </div>
+
+  </div><!-- /app -->
+
+  <script src="questionnaire.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+Flask==3.0.3
+influxdb-client==1.43.0
+psutil==6.0.0
+pynput==1.7.7

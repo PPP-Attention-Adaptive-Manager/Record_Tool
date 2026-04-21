@@ -1,0 +1,71 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cognitive Collector</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">&#9679;</span>
+        <span class="logo-text">Cognitive Collector</span>
+      </div>
+      <div id="connection-dot" class="conn-dot conn-offline" title="System agent connection"></div>
+    </header>
+
+    <!-- Session status card -->
+    <section class="card status-card">
+      <div class="status-row">
+        <span class="label">Session</span>
+        <span id="session-state" class="badge badge-idle">Inactive</span>
+      </div>
+
+      <div id="timing-block" class="timing-block hidden">
+        <div class="time-row">
+          <div class="time-cell">
+            <div class="time-label">Elapsed</div>
+            <div id="elapsed-time" class="time-value">00:00</div>
+          </div>
+          <div class="time-divider"></div>
+          <div class="time-cell">
+            <div class="time-label">Remaining</div>
+            <div id="remaining-time" class="time-value">--:--</div>
+          </div>
+        </div>
+
+        <div class="progress-wrap">
+          <div id="progress-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div id="session-id-row" class="session-id-row hidden">
+        <span class="label">ID</span>
+        <span id="session-id-val" class="session-id-val">—</span>
+      </div>
+    </section>
+
+    <!-- Agent connection info -->
+    <section class="card info-card">
+      <div class="info-row">
+        <span class="label">Agent</span>
+        <span id="agent-status" class="muted">ws://localhost:8765</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Device</span>
+        <span id="device-id-val" class="muted">—</span>
+      </div>
+    </section>
+
+    <footer class="footer">
+      Data collection managed by System Agent
+    </footer>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
