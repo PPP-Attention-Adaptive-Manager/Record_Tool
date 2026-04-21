@@ -1,0 +1,4 @@
+session_id,user_id,event_id,event_type,timestamp_ms,duration_since_last_event,source,tab_id,window_id,full_url,domain,path,query_string,title,scroll_delta_cumulative,scroll_depth_last,scroll_depth_max,scroll_event_count,tab_active,visibility_state,chrome_in_foreground,site_type,task_hint,app_name,window_title,duration,reaction_time,dual_task_success,dual_task_error,missed_response,mental_demand,physical_demand,temporal_demand,performance,effort,frustration,stress_self_report,valence,arousal
+sess_20260421_053042_0052da,P999,evt_11e0f3bb,start_session,1776763842604,,system,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+sess_20260421_053042_0052da,P999,evt_f17e133e,switch,1776763842606,,system,,,,,,,,,,,,,,,,,chrome,Test Window,10.5,,,,,,,,,,,,,
+sess_20260421_053042_0052da,P999,evt_29d01d64,end_session,1776763842612,,system,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
