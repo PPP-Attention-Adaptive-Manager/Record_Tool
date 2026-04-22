@@ -1,0 +1,6 @@
+timestamp,session_id,device_id,event_type,key,interval_ms
+1776790686.3491235,session_20260421_175806_be17b2,device_7218356a,key_release,enter,0.0
+1776790694.3832853,session_20260421_175806_be17b2,device_7218356a,key_press,q,0.0
+1776790694.5731711,session_20260421_175806_be17b2,device_7218356a,key_release,q,0.0
+1776790697.2199488,session_20260421_175806_be17b2,device_7218356a,key_press,ctrl_l,2836.66
+1776790697.4399445,session_20260421_175806_be17b2,device_7218356a,key_press,,220.0
