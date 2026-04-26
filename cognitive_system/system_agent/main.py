@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from system_agent.app_tracker import AppSnapshot, AppTracker
 from system_agent.config import RuntimeConfig, build_runtime_config
+from system_agent.context_tracker import ContextFrame, ContextTracker
 from system_agent.data_writer import DataWriter
 from system_agent.dependency_validation import validate_runtime_dependencies
 from system_agent.dual_task_manager import DualTaskManager
@@ -34,7 +35,7 @@ from system_agent.mouse_tracker import MouseTracker
 from system_agent.session_manager import SessionManager
 
 
-# ── Part 8: validation — drop events that are missing required fields ─────────
+# ── Validation: drop events that are missing required fields ──────────────────
 _REQUIRED_BEHAVIOR_FIELDS = ("timestamp", "session_id", "event_type")
 
 
@@ -44,6 +45,13 @@ def _validate_behavior_event(event: dict) -> bool:
             LOGGER.warning("Dropping malformed event (missing '%s'): %s", field, event)
             return False
     return True
+
+
+# ── Browser events that trigger a context switch in the ContextTracker ────────
+_CTX_SWITCH_TYPES = frozenset({"navigation", "tab_switch", "new_tab"})
+_CTX_CLOSE_TYPES = frozenset({"tab_close"})
+_CTX_IDLE_TYPE = "idle"
+_CTX_ACTIVE_TYPE = "active"
 
 
 class CognitiveSystemAgent:
@@ -80,6 +88,8 @@ class CognitiveSystemAgent:
         )
 
         self._dual_task_mgr = DualTaskManager()
+        self._context_tracker = ContextTracker(on_finalized=self._on_context_finalized)
+        self._hotkey_listener = None  # pynput GlobalHotKeys instance
 
         self._browser_foreground = False
         self._latest_app_snapshot: Optional[AppSnapshot] = None
@@ -102,7 +112,6 @@ class CognitiveSystemAgent:
         if not current_session:
             return
 
-        # ── Part 3: enrich every browser event with the current system app ──
         current_snap = self._latest_app_snapshot
         app_name = current_snap.app_name if current_snap else "unknown"
 
@@ -110,14 +119,63 @@ class CognitiveSystemAgent:
             if not isinstance(raw, dict):
                 continue
             event = dict(raw)
-            # ── Part 7: use system time if browser did not supply one ────────
             event.setdefault("timestamp", time.time())
             event.setdefault("session_id", current_session)
             event.setdefault("device_id", self.config.device_id)
             event.setdefault("app_name", app_name)
             if event.get("session_id") != current_session:
                 continue
-            # ── Part 8: drop malformed events ────────────────────────────────
+
+            ts = float(event["timestamp"])
+            etype = event.get("event_type", "")
+
+            # ── Context switch events ─────────────────────────────────────────
+            # These close the previous context and open a new one.
+            # The finalized event (with duration_ms) is emitted by ContextTracker.
+            if etype in _CTX_SWITCH_TYPES:
+                self._context_tracker.switch_context(ContextFrame(
+                    session_id=current_session,
+                    device_id=self.config.device_id,
+                    app_name=app_name,
+                    window_title=event.get("title", ""),
+                    url=event.get("url", ""),
+                    tab_id=str(event.get("tab_id", "")),
+                    start_time=ts,
+                ))
+                continue  # finalized event carries the data; skip raw write
+
+            # ── Tab close: no new context (next switch will open one) ─────────
+            if etype in _CTX_CLOSE_TYPES:
+                self._context_tracker.close_context(ts)
+                continue
+
+            # ── Idle: user became inactive — track idle as its own context ────
+            if etype == _CTX_IDLE_TYPE:
+                self._context_tracker.switch_context(ContextFrame(
+                    session_id=current_session,
+                    device_id=self.config.device_id,
+                    app_name="idle",
+                    window_title="",
+                    url="",
+                    tab_id="",
+                    start_time=ts,
+                ))
+                continue
+
+            # ── Active: user returned from idle — resume browser context ──────
+            if etype == _CTX_ACTIVE_TYPE:
+                self._context_tracker.switch_context(ContextFrame(
+                    session_id=current_session,
+                    device_id=self.config.device_id,
+                    app_name=app_name,
+                    window_title=current_snap.window_title if current_snap else "",
+                    url="",
+                    tab_id="",
+                    start_time=ts,
+                ))
+                continue
+
+            # ── All other events (scroll, tab_hidden, …) written directly ─────
             if not _validate_behavior_event(event):
                 continue
             self.data_writer.write_behavior_event(event)
@@ -153,6 +211,15 @@ class CognitiveSystemAgent:
             **self.session_manager.snapshot().to_dict(),
         }
 
+    # ── Context tracker callback (sync — called from ContextTracker._emit) ──
+
+    def _on_context_finalized(self, event: dict) -> None:
+        """Receive a finalized context event and persist it to behavior.csv."""
+        if not self.session_manager.active:
+            return
+        if _validate_behavior_event(event):
+            self.data_writer.write_behavior_event(event)
+
     # ------------------------------------------------------------------
     # Local tracker callbacks
     # ------------------------------------------------------------------
@@ -183,22 +250,22 @@ class CognitiveSystemAgent:
             return
 
         command = self.session_manager.set_browser_foreground(snapshot.is_browser)
-
-        # ── Parts 1, 2: full payload with window_title + parsed context in extra ─
         session_id = self.session_manager.session_id
+
+        # Switch the active context to the newly focused app.
+        # ContextTracker closes the old context (emitting a finalized event with
+        # duration_ms) and opens a new one for this snapshot.
         if session_id:
-            event = {
-                "timestamp": time.time(),
-                "session_id": session_id,
-                "device_id": self.config.device_id,
-                "event_type": "active_app_change",
-                "app_name": snapshot.app_name,
-                "window_title": snapshot.window_title,
-                # context: open filename for VSCode, full title for everything else
-                "extra": snapshot.context,
-            }
-            if _validate_behavior_event(event):
-                self.data_writer.write_behavior_event(event)
+            ts = time.time()
+            self._context_tracker.switch_context(ContextFrame(
+                session_id=session_id,
+                device_id=self.config.device_id,
+                app_name=snapshot.app_name,
+                window_title=snapshot.window_title,
+                url="",
+                tab_id="",
+                start_time=ts,
+            ))
 
         if command:
             await self._send_recording_command(command)
@@ -222,6 +289,18 @@ class CognitiveSystemAgent:
 
         self.keyboard_tracker.start()
         self.mouse_tracker.start()
+
+        # Open the initial context so the very first interval has a start_time.
+        snap = self._latest_app_snapshot
+        self._context_tracker.open_context(ContextFrame(
+            session_id=session_id,
+            device_id=self.config.device_id,
+            app_name=snap.app_name if snap else "unknown",
+            window_title=snap.window_title if snap else "",
+            url="",
+            tab_id="",
+            start_time=time.time(),
+        ))
 
         # Apply current browser focus immediately; emits start/resume when foreground.
         initial_command = self.session_manager.set_browser_foreground(self._browser_foreground)
@@ -257,6 +336,10 @@ class CognitiveSystemAgent:
 
         self.keyboard_tracker.stop()
         self.mouse_tracker.stop()
+
+        # Force-close the active context BEFORE deactivating the session so the
+        # finalized event can still be written (session_id is still valid here).
+        self._context_tracker.force_close()
 
         await self.extension_server.broadcast(
             {
@@ -392,8 +475,11 @@ class CognitiveSystemAgent:
     # ── Part 5: global hotkey to trigger questionnaire mid-session ────────────
 
     def _setup_questionnaire_hotkey(self) -> None:
+        # pynput is already a project dependency (keyboard + mouse tracking).
+        # The 'keyboard' package is NOT used — it is unreliable on Windows without
+        # admin rights and has no conda/venv wheel on some platforms.
         try:
-            import keyboard as kb  # optional dependency
+            from pynput import keyboard as _pynput_kb  # type: ignore[import]
 
             def _trigger() -> None:
                 if not self.session_manager.active or self._awaiting_questionnaire:
@@ -403,10 +489,16 @@ class CognitiveSystemAgent:
                         lambda: asyncio.create_task(self._open_questionnaire_now())
                     )
 
-            kb.add_hotkey("ctrl+shift+q", _trigger)
-            LOGGER.info("Questionnaire hotkey registered: Ctrl+Shift+Q")
+            # GlobalHotKeys maps pynput key-combo strings to callbacks.
+            # "<ctrl>+<shift>+q" matches Ctrl+Shift+Q on all platforms.
+            self._hotkey_listener = _pynput_kb.GlobalHotKeys(
+                {"<ctrl>+<shift>+q": _trigger}
+            )
+            self._hotkey_listener.start()
+            LOGGER.info("Questionnaire hotkey registered: Ctrl+Shift+Q (pynput)")
         except Exception as exc:
-            LOGGER.warning("Could not register questionnaire hotkey (keyboard lib?): %s", exc)
+            LOGGER.warning("Could not register questionnaire hotkey: %s", exc)
+            self._hotkey_listener = None
 
     async def _open_questionnaire_now(self) -> None:
         if not self.session_manager.active or self._awaiting_questionnaire:
@@ -464,6 +556,13 @@ class CognitiveSystemAgent:
                 await self.stop_session(reason="shutdown", open_questionnaire=False)
             except Exception:
                 pass
+            # Stop the pynput hotkey listener (if it was registered successfully)
+            if self._hotkey_listener is not None:
+                try:
+                    self._hotkey_listener.stop()
+                except Exception:
+                    pass
+                self._hotkey_listener = None
             self.app_tracker.stop()
             self.keyboard_tracker.stop()
             self.mouse_tracker.stop()

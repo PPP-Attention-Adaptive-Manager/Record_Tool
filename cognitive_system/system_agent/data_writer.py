@@ -38,22 +38,24 @@ class DataWriter:
 
     _CSV_SCHEMAS = {
         "behavior": [
-            "timestamp",
+            "timestamp",         # epoch seconds (= end_time for context_end events)
             "session_id",
             "device_id",
             "event_type",
             "app_name",
-            "window_title",      # OS-level window title (active_app_change events)
+            "window_title",      # OS-level window title
             "url",
             "title",
             "tab_id",
+            "start_time",        # context open time  (epoch seconds, context_end only)
+            "end_time",          # context close time (epoch seconds, context_end only)
             "scroll_delta_y",
             "scroll_total_y",
-            "duration_ms",
+            "duration_ms",       # end_time - start_time in ms  (context_end only)
             "reaction_time_ms",
             "miss",
             "error",
-            "extra",             # parsed context (e.g. open filename in VSCode)
+            "extra",
         ],
         "dual_task": [
             "timestamp",
