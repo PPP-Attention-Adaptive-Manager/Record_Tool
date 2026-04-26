@@ -1,17 +1,23 @@
-1. Install dependencies
+1. Edit the shared config if needed
+
+```bash
+browser_agent_v2/config/runtime_config.json
+```
+
+2. Install dependencies
 
 ```bash
 cd cognitive_system
 python setup.py
 ```
 
-2. Start the system agent
+3. Start the system agent
 
 ```bash
 .venv/Scripts/python system_agent/main.py
 ```
 
-3. Complete startup configuration in terminal
+4. Complete startup configuration in terminal
 
 - mode
 - duration
@@ -20,9 +26,9 @@ python setup.py
 - dual-task enabled
 - questionnaire enabled
 
-4. Press Enter to start the session
+5. Press Enter to start the session
 
-5. Load the extension
+6. Load the extension
 
 - Open `chrome://extensions`
 - Enable Developer mode
@@ -35,4 +41,3 @@ Behavior summary:
 - Recording starts/resumes/pauses automatically based on browser foreground
 - In experimental mode, reaction probes appear periodically as clickable squares
 - At session end, questionnaire opens in browser tab and submits to system agent
-

@@ -3,9 +3,8 @@ import {
   EVENT_TYPE,
   MSG,
   SESSION_STATE,
-  SYSTEM_AGENT_HTTP,
-  SYSTEM_AGENT_WS,
 } from "../shared/constants.js";
+import { buildSystemAgentUrls, loadRuntimeConfig } from "../shared/runtime_config.js";
 import { nowSec } from "../shared/utils.js";
 
 function defaultSessionStatus() {
@@ -27,6 +26,8 @@ let eventBuffer = [];
 let deviceId = null;
 let ws = null;
 let reconnectTimer = null;
+let systemAgentHttp = "http://localhost:8080";
+let systemAgentWs = "ws://localhost:8765";
 
 async function ensureDeviceId() {
   if (deviceId) return deviceId;
@@ -99,7 +100,7 @@ function connectWS() {
     return;
   }
   try {
-    ws = new WebSocket(SYSTEM_AGENT_WS);
+    ws = new WebSocket(systemAgentWs);
     ws.onopen = () => {
       connectionOnline = true;
       persistState();
@@ -403,7 +404,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     const sent = sendWS(payload);
     if (!sent) {
-      fetch(`${SYSTEM_AGENT_HTTP}/questionnaire`, {
+      fetch(`${systemAgentHttp}/questionnaire`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload.results),
@@ -446,9 +447,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 (async () => {
+  const runtimeConfig = await loadRuntimeConfig();
+  const endpoints = buildSystemAgentUrls(runtimeConfig);
+  systemAgentHttp = endpoints.httpBaseUrl;
+  systemAgentWs = endpoints.websocketUrl;
   await ensureDeviceId();
   await restoreState();
   notifyPopup();
   connectWS();
 })();
-

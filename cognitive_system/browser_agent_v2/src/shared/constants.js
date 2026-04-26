@@ -1,6 +1,3 @@
-export const SYSTEM_AGENT_WS = "ws://localhost:8765";
-export const SYSTEM_AGENT_HTTP = "http://localhost:8080";
-
 export const SESSION_STATE = Object.freeze({
   INACTIVE: "inactive",
   RUNNING: "running",
@@ -42,4 +39,3 @@ export const CFG = Object.freeze({
   ALARM_HEARTBEAT: "heartbeat",
   ALARM_FLUSH: "flush_events",
 });
-

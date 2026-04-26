@@ -1,0 +1,27 @@
+{
+  "server": {
+    "http_host": "localhost",
+    "http_port": 5001,
+    "websocket_host": "localhost",
+    "websocket_port": 5000
+  },
+  "agent": {
+    "mode": "experimental",
+    "session_duration_minutes": 30,
+    "csv_enabled": true,
+    "influx_enabled": false,
+    "dual_task_enabled": true,
+    "questionnaire_enabled": true,
+    "dual_task_interval_seconds": 30,
+    "dual_task_timeout_seconds": 3,
+    "keyboard_tracking_enabled": true,
+    "mouse_tracking_enabled": true
+  },
+  "influx": {
+    "url": "http://localhost:8086",
+    "org": "cognitive_lab",
+    "behavior_bucket": "behavior_bucket",
+    "keyboard_bucket": "keyboard_bucket",
+    "mouse_bucket": "mouse_bucket"
+  }
+}

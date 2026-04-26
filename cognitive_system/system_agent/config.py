@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 MODE_EXPERIMENTAL = "experimental"
 MODE_PRODUCTION = "production"
@@ -30,6 +31,83 @@ def _default_data_dir() -> Path:
     return _repo_root() / "data"
 
 
+def _shared_runtime_config_path() -> Path:
+    return _repo_root() / "browser_agent_v2" / "config" / "runtime_config.json"
+
+
+_SHARED_RUNTIME_CONFIG_CACHE: dict[str, Any] | None = None
+
+
+def _load_shared_runtime_config() -> dict[str, Any]:
+    global _SHARED_RUNTIME_CONFIG_CACHE
+    if _SHARED_RUNTIME_CONFIG_CACHE is not None:
+        return _SHARED_RUNTIME_CONFIG_CACHE
+
+    path = _shared_runtime_config_path()
+    if not path.exists():
+        _SHARED_RUNTIME_CONFIG_CACHE = {}
+        return _SHARED_RUNTIME_CONFIG_CACHE
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in shared runtime config: {path}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"Shared runtime config must contain a JSON object: {path}")
+
+    _SHARED_RUNTIME_CONFIG_CACHE = payload
+    return _SHARED_RUNTIME_CONFIG_CACHE
+
+
+def _shared_get(*keys: str, default: Any) -> Any:
+    current: Any = _load_shared_runtime_config()
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return default if current is None else current
+
+
+def _shared_str(default: str, *keys: str) -> str:
+    value = _shared_get(*keys, default=default)
+    return value.strip() if isinstance(value, str) and value.strip() else default
+
+
+def _shared_int(default: int, *keys: str) -> int:
+    value = _shared_get(*keys, default=default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _shared_bool(default: bool, *keys: str) -> bool:
+    coerced = _coerce_bool(_shared_get(*keys, default=default))
+    return default if coerced is None else coerced
+
+
+def _shared_optional_bool(default: bool | None, *keys: str) -> bool | None:
+    value = _shared_get(*keys, default=default)
+    if value is None:
+        return default
+    return _coerce_bool(value)
+
+
 @dataclass
 class RuntimeConfig:
     mode: str
@@ -43,10 +121,20 @@ class RuntimeConfig:
     keyboard_tracking_enabled: bool = True
     mouse_tracking_enabled: bool = True
 
-    websocket_host: str = field(default_factory=lambda: os.environ.get("WS_HOST", "localhost"))
-    websocket_port: int = field(default_factory=lambda: _env_int("WS_PORT", 8765))
-    http_host: str = field(default_factory=lambda: os.environ.get("HTTP_HOST", "localhost"))
-    http_port: int = field(default_factory=lambda: _env_int("HTTP_PORT", 8080))
+    websocket_host: str = field(
+        default_factory=lambda: os.environ.get("WS_HOST")
+        or _shared_str("localhost", "server", "websocket_host")
+    )
+    websocket_port: int = field(
+        default_factory=lambda: _env_int("WS_PORT", _shared_int(8765, "server", "websocket_port"))
+    )
+    http_host: str = field(
+        default_factory=lambda: os.environ.get("HTTP_HOST")
+        or _shared_str("localhost", "server", "http_host")
+    )
+    http_port: int = field(
+        default_factory=lambda: _env_int("HTTP_PORT", _shared_int(8080, "server", "http_port"))
+    )
 
     session_broadcast_interval: float = 1.0
     app_poll_interval_seconds: float = 0.5
@@ -63,12 +151,24 @@ class RuntimeConfig:
     )
     data_dir: Path = field(default_factory=_default_data_dir)
 
-    influxdb_url: str = field(default_factory=lambda: os.environ.get("INFLUXDB_URL", "http://localhost:8086"))
+    influxdb_url: str = field(
+        default_factory=lambda: os.environ.get("INFLUXDB_URL")
+        or _shared_str("http://localhost:8086", "influx", "url")
+    )
     influxdb_token: str = field(default_factory=lambda: os.environ.get("INFLUXDB_TOKEN", ""))
-    influxdb_org: str = field(default_factory=lambda: os.environ.get("INFLUXDB_ORG", "cognitive_lab"))
-    influxdb_behavior_bucket: str = "behavior_bucket"
-    influxdb_keyboard_bucket: str = "keyboard_bucket"
-    influxdb_mouse_bucket: str = "mouse_bucket"
+    influxdb_org: str = field(
+        default_factory=lambda: os.environ.get("INFLUXDB_ORG")
+        or _shared_str("cognitive_lab", "influx", "org")
+    )
+    influxdb_behavior_bucket: str = field(
+        default_factory=lambda: _shared_str("behavior_bucket", "influx", "behavior_bucket")
+    )
+    influxdb_keyboard_bucket: str = field(
+        default_factory=lambda: _shared_str("keyboard_bucket", "influx", "keyboard_bucket")
+    )
+    influxdb_mouse_bucket: str = field(
+        default_factory=lambda: _shared_str("mouse_bucket", "influx", "mouse_bucket")
+    )
 
     @property
     def session_duration_seconds(self) -> int:
@@ -84,16 +184,65 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         description="Cognitive System Agent startup configuration"
     )
     parser.add_argument("--non-interactive", action="store_true", help="Use CLI flags/env defaults without prompts.")
-    parser.add_argument("--mode", choices=VALID_MODES, default=os.environ.get("MODE"))
-    parser.add_argument("--duration-minutes", type=int, default=_env_int("SESSION_DURATION_MINUTES", 30))
-    parser.add_argument("--csv-enabled", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--influx-enabled", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--dual-task-enabled", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--questionnaire-enabled", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--dual-task-interval-seconds", type=int, default=_env_int("DUAL_TASK_INTERVAL_SECONDS", 30))
-    parser.add_argument("--dual-task-timeout-seconds", type=int, default=_env_int("DUAL_TASK_TIMEOUT_SECONDS", 3))
-    parser.add_argument("--keyboard-tracking-enabled", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mouse-tracking-enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--mode",
+        choices=VALID_MODES,
+        default=os.environ.get("MODE") or _shared_str(MODE_EXPERIMENTAL, "agent", "mode"),
+    )
+    parser.add_argument(
+        "--duration-minutes",
+        type=int,
+        default=_env_int(
+            "SESSION_DURATION_MINUTES",
+            _shared_int(30, "agent", "session_duration_minutes"),
+        ),
+    )
+    parser.add_argument(
+        "--csv-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(True, "agent", "csv_enabled"),
+    )
+    parser.add_argument(
+        "--influx-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(False, "agent", "influx_enabled"),
+    )
+    parser.add_argument(
+        "--dual-task-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_optional_bool(None, "agent", "dual_task_enabled"),
+    )
+    parser.add_argument(
+        "--questionnaire-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_optional_bool(None, "agent", "questionnaire_enabled"),
+    )
+    parser.add_argument(
+        "--dual-task-interval-seconds",
+        type=int,
+        default=_env_int(
+            "DUAL_TASK_INTERVAL_SECONDS",
+            _shared_int(30, "agent", "dual_task_interval_seconds"),
+        ),
+    )
+    parser.add_argument(
+        "--dual-task-timeout-seconds",
+        type=int,
+        default=_env_int(
+            "DUAL_TASK_TIMEOUT_SECONDS",
+            _shared_int(3, "agent", "dual_task_timeout_seconds"),
+        ),
+    )
+    parser.add_argument(
+        "--keyboard-tracking-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(True, "agent", "keyboard_tracking_enabled"),
+    )
+    parser.add_argument(
+        "--mouse-tracking-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(True, "agent", "mouse_tracking_enabled"),
+    )
     return parser.parse_args(argv)
 
 

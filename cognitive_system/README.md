@@ -60,14 +60,23 @@ No silent degraded mode for critical runtime dependencies:
 
 From `cognitive_system/`:
 
+1. Edit the shared runtime config if you want to change ports or defaults:
+
+```bash
+browser_agent_v2/config/runtime_config.json
+```
+
+2. Install dependencies and start the agent:
+
 ```bash
 python setup.py
 .venv/Scripts/python system_agent/main.py
 ```
+
+If you enable InfluxDB export, keep `INFLUXDB_TOKEN` in your environment; the shared config file intentionally stores only non-secret defaults.
 
 Then load unpacked extension:
 
 - Chrome -> `chrome://extensions`
 - Enable Developer Mode
 - Load unpacked -> `cognitive_system/browser_agent_v2`
-
