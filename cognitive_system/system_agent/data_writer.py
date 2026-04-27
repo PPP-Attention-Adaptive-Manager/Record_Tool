@@ -102,6 +102,28 @@ class DataWriter:
             "valence",
             "arousal",
         ],
+        "notification": [
+            "timestamp",
+            "session_id",
+            "device_id",
+            "app_source",
+            "notif_id",
+            "interaction_type",
+            "response_latency_ms",
+        ],
+        "system_metrics": [
+            "timestamp",
+            "session_id",
+            "device_id",
+            "cpu_mean",
+            "cpu_std",
+            "cpu_spike_flag",
+            "ram_mean",
+            "memory_pressure_flag",
+            "bytes_in",
+            "bytes_out",
+            "network_rate_bps",
+        ],
     }
 
     _STREAM_TO_BUCKET = {
@@ -110,6 +132,8 @@ class DataWriter:
         "mouse": "influxdb_mouse_bucket",
         "labels": "influxdb_behavior_bucket",
         "dual_task": "influxdb_behavior_bucket",
+        "notification": "influxdb_notification_bucket",
+        "system_metrics": "influxdb_system_bucket",
     }
 
     _STREAM_TO_MEASUREMENT = {
@@ -118,7 +142,12 @@ class DataWriter:
         "mouse": "mouse_event",
         "labels": "label_event",
         "dual_task": "dual_task_event",
+        "notification": "notification_event",
+        "system_metrics": "system_metrics_event",
     }
+
+    _FLUSH_INTERVAL = 5.0   # seconds between periodic CSV flushes
+    _MAX_BUFFER = 500        # emergency flush threshold (rows per stream)
 
     def __init__(self, config: RuntimeConfig):
         self._config = config
@@ -128,6 +157,9 @@ class DataWriter:
         self._session_dir: Optional[Path] = None
         self._csv_writers: Dict[str, csv.DictWriter] = {}
         self._csv_handles: Dict[str, Any] = {}
+        self._buffers: Dict[str, list] = {}
+        self._flush_stop = threading.Event()
+        self._flush_thread: Optional[threading.Thread] = None
 
         self._influx_client = None
         self._influx_writer = None
@@ -165,17 +197,36 @@ class DataWriter:
             self._session_dir.mkdir(parents=True, exist_ok=True)
 
             if self._config.csv_enabled:
+                raw_dir = self._session_dir / "raw"
+                raw_dir.mkdir(parents=True, exist_ok=True)
                 for stream, columns in self._CSV_SCHEMAS.items():
-                    path = self._session_dir / f"{stream}.csv"
+                    path = raw_dir / f"{stream}.csv"
                     handle = path.open("w", newline="", encoding="utf-8")
                     writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
                     writer.writeheader()
                     self._csv_handles[stream] = handle
                     self._csv_writers[stream] = writer
-            LOGGER.info("Session outputs initialized at %s", self._session_dir)
+                self._buffers = {stream: [] for stream in self._CSV_SCHEMAS}
+            LOGGER.info("Session outputs initialized at %s", self._session_dir / "raw")
+
+        if self._config.csv_enabled:
+            self._flush_stop.clear()
+            self._flush_thread = threading.Thread(
+                target=self._flush_worker, name="csv-flusher", daemon=True
+            )
+            self._flush_thread.start()
 
     def end_session(self) -> None:
+        # Stop the periodic flush thread first, then flush remaining rows.
+        self._flush_stop.set()
+        if self._flush_thread:
+            self._flush_thread.join(timeout=6.0)
+            self._flush_thread = None
+
         with self._lock:
+            for stream in list(self._buffers.keys()):
+                self._flush_stream_locked(stream)
+            self._buffers.clear()
             self._close_csv_handles_locked()
             self._session_id = None
             self._session_dir = None
@@ -194,6 +245,27 @@ class DataWriter:
                 pass
         self._csv_handles.clear()
         self._csv_writers.clear()
+
+    def _flush_worker(self) -> None:
+        while not self._flush_stop.wait(self._FLUSH_INTERVAL):
+            with self._lock:
+                for stream in list(self._buffers.keys()):
+                    self._flush_stream_locked(stream)
+
+    def _flush_stream_locked(self, stream: str) -> None:
+        """Write all buffered rows for *stream* to CSV. Must be called with self._lock held."""
+        buf = self._buffers.get(stream)
+        if not buf:
+            return
+        writer = self._csv_writers.get(stream)
+        handle = self._csv_handles.get(stream)
+        if not writer or not handle:
+            self._buffers[stream] = []
+            return
+        for row in buf:
+            writer.writerow(row)
+        handle.flush()
+        self._buffers[stream] = []
 
     def write_behavior_event(self, event: Dict[str, Any]) -> None:
         normalized = self._normalize_event(event)
@@ -216,6 +288,14 @@ class DataWriter:
         normalized = self._normalize_event(event)
         self._write_stream("dual_task", normalized)
 
+    def write_notification_event(self, event: Dict[str, Any]) -> None:
+        normalized = self._normalize_event(event)
+        self._write_stream("notification", normalized)
+
+    def write_system_metrics_event(self, event: Dict[str, Any]) -> None:
+        normalized = self._normalize_event(event)
+        self._write_stream("system_metrics", normalized)
+
     def _normalize_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(event)
         payload["timestamp"] = _as_epoch_seconds(payload.get("timestamp"))
@@ -231,17 +311,15 @@ class DataWriter:
         if not self._config.csv_enabled:
             return
         with self._lock:
-            writer = self._csv_writers.get(stream)
-            handle = self._csv_handles.get(stream)
-            if not writer or not handle:
+            buf = self._buffers.get(stream)
+            if buf is None:
                 return
-
             row = dict(event)
             if stream == "behavior":
                 row["extra"] = self._build_behavior_extra(event)
-
-            writer.writerow(row)
-            handle.flush()
+            buf.append(row)
+            if len(buf) >= self._MAX_BUFFER:
+                self._flush_stream_locked(stream)
 
     def _build_behavior_extra(self, event: Dict[str, Any]) -> str:
         # If the caller already set a non-empty `extra` (e.g. parsed VSCode filename),

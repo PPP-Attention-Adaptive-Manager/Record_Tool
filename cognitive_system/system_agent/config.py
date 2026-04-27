@@ -120,6 +120,9 @@ class RuntimeConfig:
     dual_task_timeout_seconds: int
     keyboard_tracking_enabled: bool = True
     mouse_tracking_enabled: bool = True
+    notification_tracking_enabled: bool = True
+    system_metrics_enabled: bool = True
+    ui_overlay_enabled: bool = True
 
     websocket_host: str = field(
         default_factory=lambda: os.environ.get("WS_HOST")
@@ -168,6 +171,12 @@ class RuntimeConfig:
     )
     influxdb_mouse_bucket: str = field(
         default_factory=lambda: _shared_str("mouse_bucket", "influx", "mouse_bucket")
+    )
+    influxdb_notification_bucket: str = field(
+        default_factory=lambda: _shared_str("notification_bucket", "influx", "notification_bucket")
+    )
+    influxdb_system_bucket: str = field(
+        default_factory=lambda: _shared_str("system_bucket", "influx", "system_bucket")
     )
 
     @property
@@ -242,6 +251,21 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--mouse-tracking-enabled",
         action=argparse.BooleanOptionalAction,
         default=_shared_bool(True, "agent", "mouse_tracking_enabled"),
+    )
+    parser.add_argument(
+        "--notification-tracking-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(True, "agent", "notification_tracking_enabled"),
+    )
+    parser.add_argument(
+        "--system-metrics-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(True, "agent", "system_metrics_enabled"),
+    )
+    parser.add_argument(
+        "--ui-overlay-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(True, "agent", "ui_overlay_enabled"),
     )
     return parser.parse_args(argv)
 
@@ -351,6 +375,9 @@ def build_runtime_config(argv: Sequence[str] | None = None) -> RuntimeConfig:
         dual_task_timeout_seconds=dual_timeout,
         keyboard_tracking_enabled=args.keyboard_tracking_enabled,
         mouse_tracking_enabled=args.mouse_tracking_enabled,
+        notification_tracking_enabled=args.notification_tracking_enabled,
+        system_metrics_enabled=args.system_metrics_enabled,
+        ui_overlay_enabled=args.ui_overlay_enabled,
     )
 
     config.data_dir.mkdir(parents=True, exist_ok=True)

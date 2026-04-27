@@ -32,7 +32,10 @@ from system_agent.dual_task_manager import DualTaskManager
 from system_agent.extension_server import ExtensionServer
 from system_agent.keyboard_tracker import KeyboardTracker
 from system_agent.mouse_tracker import MouseTracker
+from system_agent.notification_tracker import NotificationTracker
 from system_agent.session_manager import SessionManager
+from system_agent.system_metrics import SystemMetricsCollector
+from system_agent.ui_overlay import UIOverlay
 
 
 # ── Validation: drop events that are missing required fields ──────────────────
@@ -94,6 +97,16 @@ class CognitiveSystemAgent:
             browser_processes=set(config.browser_processes),
             on_change=self._on_active_app_change,
         )
+
+        self._notification_tracker = NotificationTracker(
+            on_event=self._handle_notification_event,
+            enabled=config.notification_tracking_enabled,
+        )
+        self._system_metrics = SystemMetricsCollector(
+            on_event=self._handle_system_metrics_event,
+            enabled=config.system_metrics_enabled,
+        )
+        self._ui_overlay = UIOverlay() if config.ui_overlay_enabled else None
 
         self._browser_foreground = False
         self._latest_app_snapshot: Optional[AppSnapshot] = None
@@ -233,10 +246,33 @@ class CognitiveSystemAgent:
             return
         self.data_writer.write_keyboard_event(event)
 
+    def _handle_notification_event(self, event: dict) -> None:
+        if not self.session_manager.active:
+            return
+        event.setdefault("session_id", self.session_manager.session_id)
+        event.setdefault("device_id", self.config.device_id)
+        event.setdefault("timestamp", time.time())
+        self.data_writer.write_notification_event(event)
+
+    def _handle_system_metrics_event(self, event: dict) -> None:
+        if not self.session_manager.active:
+            return
+        event.setdefault("session_id", self.session_manager.session_id)
+        event.setdefault("device_id", self.config.device_id)
+        self.data_writer.write_system_metrics_event(event)
+
     def _handle_mouse_event(self, event: dict) -> None:
         if not self.session_manager.active:
             return
         self.data_writer.write_mouse_event(event)
+
+    def _on_overlay_stop_requested(self) -> None:
+        if self.loop:
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(
+                    self.stop_session(reason="user_overlay_stop")
+                )
+            )
 
     def _on_active_app_change(self, snapshot: AppSnapshot) -> None:
         self._latest_app_snapshot = snapshot
@@ -293,6 +329,10 @@ class CognitiveSystemAgent:
 
         self.keyboard_tracker.start()
         self.mouse_tracker.start()
+        self._notification_tracker.start()
+        self._system_metrics.start()
+        if self._ui_overlay:
+            self._ui_overlay.start(on_stop_requested=self._on_overlay_stop_requested)
 
         # Open the initial context so the very first interval has a start_time.
         snap = self._latest_app_snapshot
@@ -340,6 +380,8 @@ class CognitiveSystemAgent:
 
         self.keyboard_tracker.stop()
         self.mouse_tracker.stop()
+        self._notification_tracker.stop()
+        self._system_metrics.stop()
 
         # Force-close the active context BEFORE deactivating the session so the
         # finalized event can still be written (session_id is still valid here).
@@ -374,17 +416,23 @@ class CognitiveSystemAgent:
         else:
             self.data_writer.end_session()
 
+        if self._ui_overlay:
+            self._ui_overlay.update("stopped", 0.0)
+
         self._session_finished.set()
         print(f"[SESSION STOPPED] reason={reason}\n")
 
     async def _status_broadcast_loop(self) -> None:
         while self.session_manager.active:
             await self._broadcast_status()
-            # ── Part 6: overwrite the same terminal line every second ─────────
             remaining = self.session_manager.get_remaining()
             mins = int(remaining) // 60
             secs = int(remaining) % 60
             print(f"\rTime left: {mins:02d}:{secs:02d}  ", end="", flush=True)
+            if self._ui_overlay:
+                elapsed = max(0.0, self.config.session_duration_seconds - remaining)
+                snap = self.session_manager.snapshot()
+                self._ui_overlay.update(snap.state, elapsed)
             await asyncio.sleep(self.config.session_broadcast_interval)
 
     async def _session_watchdog_loop(self) -> None:
@@ -529,6 +577,9 @@ class CognitiveSystemAgent:
             f"Influx export        : {self.config.influx_enabled}\n"
             f"Dual-task            : {self.config.dual_task_enabled}\n"
             f"Questionnaire        : {self.config.questionnaire_enabled}\n"
+            f"Notifications        : {self.config.notification_tracking_enabled}\n"
+            f"System metrics       : {self.config.system_metrics_enabled}\n"
+            f"UI overlay           : {self.config.ui_overlay_enabled}\n"
             f"WebSocket endpoint   : ws://{self.config.websocket_host}:{self.config.websocket_port}\n"
             f"HTTP endpoint        : http://{self.config.http_host}:{self.config.http_port}\n"
             f"Data directory       : {self.config.data_dir}\n"
@@ -570,6 +621,10 @@ class CognitiveSystemAgent:
             self.app_tracker.stop()
             self.keyboard_tracker.stop()
             self.mouse_tracker.stop()
+            self._notification_tracker.stop()
+            self._system_metrics.stop()
+            if self._ui_overlay:
+                self._ui_overlay.stop()
             self.data_writer.close()
             await self.extension_server.stop()
             LOGGER.info("System agent shut down cleanly")
