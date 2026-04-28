@@ -1,5 +1,6 @@
 .venv/
 .env
 __pycache__/
+*.log
 /data/session_20260421_175806_be17b2/*
 /data/*
