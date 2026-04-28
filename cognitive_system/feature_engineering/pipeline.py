@@ -10,13 +10,16 @@ Pipeline stages
       b. Extract features per window (all streams)
       c. Normalize (min-max or z-score)
       d. Write  data/<session_id>/features/features_<label>.csv
-4. On the primary window (default: 30 s):
-      a. Build directed temporal + similarity graph
-      b. Write  data/<session_id>/graph/edge_list.csv
-                                         node_features.csv
-                                         graph.json
-      c. Cluster windows → cognitive states
-      d. Write  data/<session_id>/graph/communities.csv
+4. Build the session temporal graph from behavior events:
+      a. Clean + sort behavior events
+      b. Build event -> event transitions
+      c. Write  data/<session_id>/graph/nodes.csv
+                                         edges.csv
+                                         temporal_edges.csv
+      d. Build secondary per-window event graphs under graph/windows/<label>/
+5. On the primary window (default: 30 s):
+      a. Cluster windows -> cognitive states
+      b. Write  data/<session_id>/graph/communities.csv
 
 CLI usage
 ---------
@@ -37,13 +40,8 @@ import pandas as pd
 
 from .clustering import CognitiveStateClusterer
 from .features import FeatureConfig, FeatureExtractor, Normalizer
-from .graph import GraphBuilder
-from .windowing import (
-    DEFAULT_WINDOW_CONFIGS,
-    MESO_30S,
-    WindowConfig,
-    WindowEngine,
-)
+from .graph_builder import GraphBuilder, NODE_LEVEL
+from .windowing import DEFAULT_WINDOW_CONFIGS, WindowConfig, WindowEngine
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,24 +55,20 @@ _STREAM_NAMES = [
 ]
 
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-
 @dataclass
 class PipelineConfig:
     """Full pipeline configuration."""
 
     window_configs: list[WindowConfig] = field(default_factory=lambda: list(DEFAULT_WINDOW_CONFIGS))
-    """Window schemes to generate.  Defaults to 5 s / 30 s / 120 s tumbling."""
+    """Window schemes to generate. Defaults to 5 s / 30 s / 120 s tumbling."""
 
     primary_window_label: str = "30s"
-    """Label of the window config used for graph construction and clustering."""
+    """Label of the window config used for clustering."""
+
+    graph_node_level: Literal["app", "domain", "url"] = "app"
+    """Node granularity for temporal event graphs."""
 
     normalization: Literal["minmax", "zscore"] = "minmax"
-
-    similarity_threshold: float = 0.90
-    """Cosine similarity threshold for adding graph similarity edges."""
-
-    add_similarity_edges: bool = True
 
     n_clusters: int = 4
     clustering_algorithm: Literal["kmeans", "dbscan"] = "kmeans"
@@ -82,10 +76,8 @@ class PipelineConfig:
     feature_config: FeatureConfig = field(default_factory=FeatureConfig)
 
     skip_graph: bool = False
-    """Set True to skip graph + clustering (features CSV only)."""
+    """Set True to skip graph construction and clustering (features CSV only)."""
 
-
-# ── I/O helpers ───────────────────────────────────────────────────────────────
 
 def _load_streams(raw_dir: Path) -> dict[str, pd.DataFrame]:
     """Load and sort all stream CSVs from *raw_dir*."""
@@ -109,11 +101,18 @@ def _load_streams(raw_dir: Path) -> dict[str, pd.DataFrame]:
     return streams
 
 
-# ── Pipeline ──────────────────────────────────────────────────────────────────
+def _remove_legacy_graph_artifacts(graph_dir: Path) -> None:
+    """Remove invalid window-node graph outputs from previous runs."""
+    for name in ("edge_list.csv", "graph.json", "node_features.csv"):
+        path = graph_dir / name
+        if path.exists():
+            path.unlink()
+            LOGGER.info("Removed legacy graph artifact: %s", path.name)
+
 
 class FeaturePipeline:
     """
-    Orchestrates the full RAW → FEATURES → GRAPH pipeline for one session.
+    Orchestrates the full RAW -> FEATURES -> GRAPH pipeline for one session.
 
     Usage
     -----
@@ -122,11 +121,9 @@ class FeaturePipeline:
     """
 
     def __init__(self, config: Optional[PipelineConfig] = None) -> None:
-        self.config   = config or PipelineConfig()
-        self._engine  = WindowEngine()
+        self.config = config or PipelineConfig()
+        self._engine = WindowEngine()
         self._extractor = FeatureExtractor(self.config.feature_config)
-
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def run(
         self,
@@ -139,40 +136,38 @@ class FeaturePipeline:
         Parameters
         ----------
         session_id : folder name under data_dir.
-        data_dir   : defaults to  <repo_root>/data  (same as system_agent).
+        data_dir   : defaults to <repo_root>/data (same as system_agent).
 
         Returns
         -------
-        dict mapping output name → Path (for programmatic use / testing).
+        dict mapping output name -> Path.
         """
         t0 = time.perf_counter()
 
         data_dir = data_dir or self._default_data_dir()
         session_dir = data_dir / session_id
 
-        raw_dir      = session_dir / "raw"
+        raw_dir = session_dir / "raw"
         features_dir = session_dir / "features"
-        graph_dir    = session_dir / "graph"
+        graph_dir = session_dir / "graph"
         features_dir.mkdir(parents=True, exist_ok=True)
 
         LOGGER.info("=" * 60)
         LOGGER.info("Pipeline start  session=%s", session_id)
         LOGGER.info("  raw_dir     : %s", raw_dir)
 
-        # ── 1. Load streams ───────────────────────────────────────────────────
         streams = _load_streams(raw_dir)
         if not streams:
             raise FileNotFoundError(f"No stream CSVs found in {raw_dir}")
 
-        # ── 2. Infer session span ─────────────────────────────────────────────
         t_start, t_end = self._engine.session_span(*streams.values())
-        duration_min   = (t_end - t_start) / 60
+        duration_min = (t_end - t_start) / 60
         LOGGER.info("  session span : %.1f min  [%.3f -> %.3f]", duration_min, t_start, t_end)
 
         outputs: dict[str, Path] = {}
         primary_features: Optional[pd.DataFrame] = None
+        windows_by_label: dict[str, pd.DataFrame] = {}
 
-        # ── 3. Feature extraction per window config ───────────────────────────
         for wc in self.config.window_configs:
             LOGGER.info("Window config: %s", wc.label)
 
@@ -180,13 +175,14 @@ class FeaturePipeline:
             if windows.empty:
                 LOGGER.warning("  No windows generated for config %s", wc.label)
                 continue
+            windows_by_label[wc.label] = windows
 
             features_raw = self._extractor.extract(streams, windows, session_id)
             if features_raw.empty:
                 LOGGER.warning("  No features extracted for config %s", wc.label)
                 continue
 
-            normalizer   = Normalizer(self.config.normalization)
+            normalizer = Normalizer(self.config.normalization)
             features_norm = normalizer.fit_transform(features_raw)
 
             out_path = features_dir / f"features_{wc.label}.csv"
@@ -202,67 +198,71 @@ class FeaturePipeline:
             if wc.label == self.config.primary_window_label:
                 primary_features = features_norm
 
-        # ── 4. Graph + clustering (primary window only) ───────────────────────
         if not self.config.skip_graph:
+            graph_dir.mkdir(parents=True, exist_ok=True)
+            _remove_legacy_graph_artifacts(graph_dir)
+
+            builder = GraphBuilder(node_level=self.config.graph_node_level)
+            behavior_df = streams.get("behavior", pd.DataFrame())
+            cleaned_events, nodes_df, edges_df, temporal_edges_df = builder.build(behavior_df)
+            if cleaned_events.empty:
+                LOGGER.warning("Graph: no valid behavior events found after cleaning/filtering.")
+
+            builder.export(nodes_df, edges_df, temporal_edges_df, graph_dir)
+            outputs["nodes"] = graph_dir / "nodes.csv"
+            outputs["edges"] = graph_dir / "edges.csv"
+            outputs["temporal_edges"] = graph_dir / "temporal_edges.csv"
+
+            windows_root = graph_dir / "windows"
+            for wc in self.config.window_configs:
+                windows = windows_by_label.get(wc.label)
+                if windows is None:
+                    continue
+                window_nodes_df, window_edges_df, window_temporal_df = builder.build_windowed(
+                    cleaned_events,
+                    windows,
+                )
+                out_dir = windows_root / wc.label
+                builder.export_windowed(window_nodes_df, window_edges_df, window_temporal_df, out_dir)
+                outputs[f"windowed_graph_{wc.label}"] = out_dir
+
             if primary_features is None:
-                # Fall back to the first available feature set.
                 for wc in self.config.window_configs:
-                    p = features_dir / f"features_{wc.label}.csv"
-                    if p.exists():
-                        primary_features = pd.read_csv(p)
+                    path = features_dir / f"features_{wc.label}.csv"
+                    if path.exists():
+                        primary_features = pd.read_csv(path)
                         LOGGER.warning(
-                            "Primary window '%s' missing; using '%s' for graph.",
-                            self.config.primary_window_label, wc.label,
+                            "Primary window '%s' missing; using '%s' for clustering.",
+                            self.config.primary_window_label,
+                            wc.label,
                         )
                         break
 
             if primary_features is not None and not primary_features.empty:
-                graph_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    clusterer = CognitiveStateClusterer(
+                        n_clusters=self.config.n_clusters,
+                        algorithm=self.config.clustering_algorithm,
+                    )
+                    cluster_labels = clusterer.fit_predict(primary_features)
+                    state_labels = clusterer.label_states(primary_features, cluster_labels)
 
-                # Graph construction.
-                builder = GraphBuilder(
-                    similarity_threshold=self.config.similarity_threshold,
-                    add_similarity_edges=self.config.add_similarity_edges,
-                )
-                nodes_df, edges_df = builder.build(primary_features)
-
-                # Clustering.
-                clusterer = CognitiveStateClusterer(
-                    n_clusters=self.config.n_clusters,
-                    algorithm=self.config.clustering_algorithm,
-                )
-                cluster_labels = clusterer.fit_predict(primary_features)
-                state_labels   = clusterer.label_states(primary_features, cluster_labels)
-
-                # Attach labels to node DataFrame before export.
-                nodes_df = nodes_df.copy()
-                nodes_df["cluster_id"]     = cluster_labels.values
-                nodes_df["cognitive_state"] = state_labels.values
-
-                builder.export(nodes_df, edges_df, graph_dir, session_id,
-                               window_label=self.config.primary_window_label)
-
-                comm_path = clusterer.export(primary_features, cluster_labels, state_labels, graph_dir)
-                outputs["communities"]    = comm_path
-                outputs["edge_list"]      = graph_dir / "edge_list.csv"
-                outputs["node_features"]  = graph_dir / "node_features.csv"
-                outputs["graph_json"]     = graph_dir / "graph.json"
+                    comm_path = clusterer.export(primary_features, cluster_labels, state_labels, graph_dir)
+                    outputs["communities"] = comm_path
+                except Exception as exc:
+                    LOGGER.warning("Skipping clustering because it failed: %s", exc)
             else:
-                LOGGER.warning("Skipping graph/clustering: no primary feature data.")
+                LOGGER.warning("Skipping clustering: no primary feature data.")
 
         elapsed = time.perf_counter() - t0
         LOGGER.info("Pipeline complete in %.2f s  outputs: %s", elapsed, list(outputs.keys()))
         return outputs
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _default_data_dir() -> Path:
         """Mirror the same default data directory as system_agent/config.py."""
         return Path(__file__).resolve().parent.parent / "data"
 
-
-# ── CLI entry point ───────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -277,7 +277,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--primary-window", default="30s", choices=["5s", "30s", "120s"],
         dest="primary_window",
-        help="Window size used for graph + clustering (default: 30s)",
+        help="Window size used for clustering (default: 30s)",
+    )
+    p.add_argument(
+        "--graph-node-level", default="app", choices=NODE_LEVEL,
+        dest="graph_node_level",
+        help="Temporal graph node granularity: app, domain, or url (default: app)",
     )
     p.add_argument(
         "--normalization", default="minmax", choices=["minmax", "zscore"],
@@ -310,6 +315,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     config = PipelineConfig(
         primary_window_label=args.primary_window,
+        graph_node_level=args.graph_node_level,
         normalization=args.normalization,
         clustering_algorithm=args.clustering,
         n_clusters=args.n_clusters,

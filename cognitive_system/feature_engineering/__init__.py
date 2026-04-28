@@ -3,12 +3,13 @@ Feature engineering pipeline for multi-stream cognitive behavioral data.
 
 Pipeline stages
 ---------------
-RAW CSVs  →  WindowEngine  →  FeatureExtractor  →  GraphBuilder
-                                     ↓                    ↓
-                              features_*.csv        edge_list.csv
-                                                   node_features.csv
-                                                      graph.json
-                                                   communities.csv
+RAW CSVs  ->  WindowEngine  ->  FeatureExtractor
+     |                              |
+behavior.csv                  features_*.csv
+     |                              |
+TemporalGraphBuilder          communities.csv
+     |
+nodes.csv / edges.csv / temporal_edges.csv
 
 Entry point
 -----------
@@ -18,7 +19,7 @@ Entry point
 
 from .windowing import WindowConfig, WindowEngine, MICRO_5S, MESO_30S, MACRO_120S, DEFAULT_WINDOW_CONFIGS
 from .features import FeatureConfig, FeatureExtractor, Normalizer
-from .graph import GraphBuilder
+from .graph_builder import GraphBuilder, GraphConfig, NODE_LEVEL
 from .clustering import CognitiveStateClusterer
 
 # pipeline is intentionally NOT imported here to avoid a sys.modules
@@ -28,6 +29,6 @@ __all__ = [
     "WindowConfig", "WindowEngine",
     "MICRO_5S", "MESO_30S", "MACRO_120S", "DEFAULT_WINDOW_CONFIGS",
     "FeatureConfig", "FeatureExtractor", "Normalizer",
-    "GraphBuilder",
+    "GraphBuilder", "GraphConfig", "NODE_LEVEL",
     "CognitiveStateClusterer",
 ]
