@@ -1,82 +1,126 @@
-# Cognitive Behavior Collection System
+# Cognitive System
 
-This project is split into two components:
+`cognitive_system/` contains the full collection, storage, analysis, and visualization stack for behavioral session modeling.
 
-- `system_agent/`: master orchestrator and single source of truth for session timing/state
-- `browser_agent_v2/`: passive browser collector + UI display, driven by system-agent commands
+## Main Components
 
-## Corrected Architecture
+- `system_agent/`
+  - Python orchestrator running on the desktop
+  - Owns session timing, active-app tracking, CSV writing, and runtime coordination
+  - Collects app/context events, keyboard, mouse, notification, system metrics, and dual-task results
 
-System agent responsibilities:
+- `browser_agent_v2/`
+  - Chrome extension
+  - Sends browser navigation, tab, active/idle, and scroll events to the system agent
+  - Displays runtime status from the agent
 
-- Startup configuration flow:
-  - mode (`experimental` or `production`)
-  - session duration
-  - CSV export enabled
-  - Influx export enabled
-  - dual-task enabled
-  - questionnaire enabled
-- Global session timer ownership (elapsed/remaining)
-- Browser foreground detection (OS active-window tracking)
-- Recording orchestration commands:
-  - `start_recording` / `resume_recording` when browser is foreground
-  - `pause_recording` when browser leaves foreground
-  - `stop_recording` on session end
-- Periodic dual-task probe triggering (experimental mode only)
-- Session-end questionnaire trigger in browser
+- `feature_engineering/`
+  - Builds session windows
+  - Extracts per-window features
+  - Builds corrected temporal graphs from sequential events
+  - Exports per-window graph slices
+  - Clusters windows into cognitive-state labels when clustering dependencies are installed
+  - Provides a Tkinter viewer for one-session window-graph inspection
 
-Extension responsibilities:
+- `data/`
+  - Stores per-session runtime outputs and derived analysis artifacts
 
-- Record browser events only when instructed
-- Display agent-provided session status:
-  - `inactive` / `running` / `paused`
-  - session id
-  - mode
-  - elapsed time
-  - remaining time
-  - browser recording active
-- Show reaction-time probe overlay when requested by agent
-- Open browser questionnaire page on `open_questionnaire`
+## Runtime Data Flow
 
-## Session Output
+1. `system_agent/` starts a session and opens `data/<session_id>/raw/`
+2. `browser_agent_v2/` streams browser events to the agent
+3. `system_agent/` merges context state and writes raw CSV streams
+4. `feature_engineering.pipeline` loads the raw session streams
+5. Window features are generated for `5s`, `30s`, and `120s` windows
+6. The graph builder creates event-to-event temporal transitions from `behavior.csv`
+7. Secondary window-level graph slices are exported under `graph/windows/<label>/`
+8. The graph viewer renders one session as a table of window graphs
 
-Per session:
+## Session Directory Layout
 
-- `data/<session_id>/behavior.csv`
-- `data/<session_id>/keyboard.csv`
-- `data/<session_id>/mouse.csv`
-- `data/<session_id>/labels.csv`
+Typical output for one session:
 
-## Dependency Policy
-
-No silent degraded mode for critical runtime dependencies:
-
-- `websockets` and `aiohttp` are required
-- if Influx is enabled, `influxdb-client` is required
-- if keyboard/mouse tracking is enabled, `pynput` is required
-- `psutil` is required for active-app browser foreground detection
-
-## Run
-
-From `cognitive_system/`:
-
-1. Edit the shared runtime config if you want to change ports or defaults:
-
-```bash
-browser_agent_v2/config/runtime_config.json
+```text
+data/<session_id>/
+|- raw/
+|  |- behavior.csv
+|  |- keyboard.csv
+|  |- mouse.csv
+|  |- dual_task.csv
+|  |- notification.csv
+|  |- system_metrics.csv
+|  `- labels.csv
+|- features/
+|  |- features_5s.csv
+|  |- features_30s.csv
+|  `- features_120s.csv
+`- graph/
+   |- nodes.csv
+   |- edges.csv
+   |- temporal_edges.csv
+   |- communities.csv
+   `- windows/
+      |- 5s/
+      |- 30s/
+      `- 120s/
 ```
 
-2. Install dependencies and start the agent:
+## Temporal Graph Semantics
 
-```bash
-python setup.py
-.venv/Scripts/python system_agent/main.py
+The graph builder does not use `window_id` as a graph node.
+
+Instead:
+
+- source node = state resolved from `event[i]`
+- target node = state resolved from `event[i+1]`
+- temporal edge timestamp = timestamp of the transition event
+
+Supported node granularities:
+
+- `app`
+- `domain`
+- `url`
+
+Main exports:
+
+- `graph/nodes.csv`
+  - `node_id,node_type`
+- `graph/edges.csv`
+  - `source,target,transition_count,total_duration,avg_duration`
+- `graph/temporal_edges.csv`
+  - `source,target,timestamp`
+
+## Viewer
+
+The viewer is intended for session-level exploration of window graphs.
+
+Run:
+
+```powershell
+.\.venv\Scripts\python -m feature_engineering.graph_viewer --session-id <session_id> --window-label 30s
 ```
 
-If you enable InfluxDB export, keep `INFLUXDB_TOKEN` in your environment; the shared config file intentionally stores only non-secret defaults.
+Current viewer behavior:
 
-Then load unpacked extension:
+- shows one session at a time
+- displays windows in a table/grid
+- renders one graph per window
+- lets you click nodes and edges to inspect features
+- shows `N/A` for node or edge features that the pipeline does not compute yet
 
-- Chrome -> `chrome://extensions`
-- Enable Developer Mode
-- Load unpacked -> `cognitive_system/browser_agent_v2`
+## Dependencies
+
+Recommended install path:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+`requirements.txt` includes both runtime and analysis dependencies. `setup.py` is still available as a quick helper, but it installs only the `system_agent` requirements.
+
+## See Also
+
+- Run instructions: [HOW_TO_RUN.md](HOW_TO_RUN.md)
+- Full architecture: [../Architecture.md](../Architecture.md)
