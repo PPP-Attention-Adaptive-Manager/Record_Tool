@@ -515,7 +515,10 @@ class SessionWindowGraphViewer:
 
         if self._bundle.windows:
             first = self._bundle.windows[0]
-            self._show_window_details(first)
+            if first.nodes:
+                self._show_node_details(first, first.nodes[0])
+            else:
+                self._show_window_details(first)
         self._on_frame_configure()
 
     def _build_window_card(self, parent, window_graph: WindowGraphView):
@@ -605,6 +608,7 @@ class SessionWindowGraphViewer:
         positions = _compute_positions(window_graph.nodes, width, height)
         node_radius = 18
         edge_hits: list[dict[str, object]] = []
+        node_hits: list[dict[str, object]] = []
 
         for edge in window_graph.edges:
             x1, y1 = positions[edge.source_key]
@@ -660,7 +664,7 @@ class SessionWindowGraphViewer:
         for node in window_graph.nodes:
             x, y = positions[node.key]
             fill = _APP_NODE if node.node_kind == "app" else _TAB_NODE
-            canvas.create_oval(
+            oval_id = canvas.create_oval(
                 x - node_radius,
                 y - node_radius,
                 x + node_radius,
@@ -669,7 +673,7 @@ class SessionWindowGraphViewer:
                 outline="#ffffff",
                 width=2,
             )
-            canvas.create_text(
+            text_id = canvas.create_text(
                 x,
                 y + node_radius + 12,
                 text=_truncate(node.label, 16),
@@ -678,12 +682,20 @@ class SessionWindowGraphViewer:
                 width=100,
                 justify="center",
             )
+            node_hits.append(
+                {
+                    "node_key": node.key,
+                    "circle_bbox": canvas.bbox(oval_id),
+                    "label_bbox": canvas.bbox(text_id),
+                }
+            )
 
         return {
             "window_graph": window_graph,
             "node_positions": positions,
             "node_radius": node_radius,
             "edge_hits": edge_hits,
+            "node_hits": node_hits,
             "node_map": {node.key: node for node in window_graph.nodes},
         }
 
@@ -695,9 +707,20 @@ class SessionWindowGraphViewer:
         window_graph = state["window_graph"]
         node_positions: dict[str, tuple[float, float]] = state["node_positions"]
         node_radius = int(state["node_radius"])
+        node_hits: list[dict[str, object]] = state.get("node_hits", [])
         node_map: dict[str, GraphNodeView] = state["node_map"]
         x = float(event.x)
         y = float(event.y)
+
+        for node_hit in node_hits:
+            for bbox_name in ("circle_bbox", "label_bbox"):
+                bbox = node_hit.get(bbox_name)
+                if not bbox:
+                    continue
+                x1, y1, x2, y2 = bbox
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    self._show_node_details(window_graph, node_map[node_hit["node_key"]])
+                    return
 
         for node_key, (nx, ny) in node_positions.items():
             if ((x - nx) ** 2 + (y - ny) ** 2) <= (node_radius ** 2):
