@@ -15,6 +15,8 @@ class DualTaskResult:
     success: bool
     miss: bool
     error: bool
+    probe_left_px: int
+    probe_top_px: int
 
 
 class DualTaskManager:
@@ -29,28 +31,23 @@ class DualTaskManager:
     _SCREEN_MARGIN = 24
 
     def __init__(self) -> None:
+        self._rng = random.Random()
         self._last_position: tuple[int, int] | None = None
 
-    def _random_position(self, screen_width: int, screen_height: int) -> tuple[int, int]:
-        x_min = 0 if screen_width <= self._WINDOW_WIDTH + self._SCREEN_MARGIN * 2 else self._SCREEN_MARGIN
-        y_min = 0 if screen_height <= self._WINDOW_HEIGHT + self._SCREEN_MARGIN * 2 else self._SCREEN_MARGIN
-        x_max = max(x_min, screen_width - self._WINDOW_WIDTH - self._SCREEN_MARGIN)
-        y_max = max(y_min, screen_height - self._WINDOW_HEIGHT - self._SCREEN_MARGIN)
-
-        position = (random.randint(x_min, x_max), random.randint(y_min, y_max))
-        for _ in range(8):
-            if position != self._last_position:
-                break
-            position = (random.randint(x_min, x_max), random.randint(y_min, y_max))
-        self._last_position = position
-        return position
-
-    def run_probe(self, probe_id: str, timeout_ms: int = 3000) -> DualTaskResult:
+    def run_probe(
+        self,
+        probe_id: str,
+        timeout_ms: int = 3000,
+        *,
+        randomize_position: bool = True,
+    ) -> DualTaskResult:
         result: dict = {
             "reaction_time_ms": 0.0,
             "success": False,
             "miss": False,
             "error": False,
+            "probe_left_px": 0,
+            "probe_top_px": 0,
         }
         done = threading.Event()
 
@@ -69,7 +66,13 @@ class DualTaskManager:
             root.resizable(False, False)
             sw = root.winfo_screenwidth()
             sh = root.winfo_screenheight()
-            x, y = self._random_position(sw, sh)
+            if randomize_position:
+                x, y = self._random_probe_position(sw, sh)
+            else:
+                x = max(0, sw // 2 - self._WINDOW_WIDTH // 2)
+                y = max(0, sh // 2 - self._WINDOW_HEIGHT // 2)
+            result["probe_left_px"] = x
+            result["probe_top_px"] = y
             root.geometry(f"{self._WINDOW_WIDTH}x{self._WINDOW_HEIGHT}+{x}+{y}")
             root.configure(bg="#0c1223")
 
@@ -131,4 +134,24 @@ class DualTaskManager:
             success=result["success"],
             miss=result["miss"],
             error=result["error"],
+            probe_left_px=result["probe_left_px"],
+            probe_top_px=result["probe_top_px"],
         )
+
+    def _random_probe_position(
+        self,
+        screen_width: int,
+        screen_height: int,
+    ) -> tuple[int, int]:
+        x_min = 0 if screen_width <= self._WINDOW_WIDTH + self._SCREEN_MARGIN * 2 else self._SCREEN_MARGIN
+        y_min = 0 if screen_height <= self._WINDOW_HEIGHT + self._SCREEN_MARGIN * 2 else self._SCREEN_MARGIN
+        x_max = max(x_min, screen_width - self._WINDOW_WIDTH - self._SCREEN_MARGIN)
+        y_max = max(y_min, screen_height - self._WINDOW_HEIGHT - self._SCREEN_MARGIN)
+
+        position = (self._rng.randint(x_min, x_max), self._rng.randint(y_min, y_max))
+        for _ in range(8):
+            if position != self._last_position:
+                break
+            position = (self._rng.randint(x_min, x_max), self._rng.randint(y_min, y_max))
+        self._last_position = position
+        return position

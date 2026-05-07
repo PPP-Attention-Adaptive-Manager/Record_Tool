@@ -72,8 +72,12 @@ _DUAL_TASK_LABEL_COLUMNS = [
     "device_id",
     "reaction_time_ms",
     "success",
+    "miss",
     "error",
     "app_name",
+    "scheduled_delay_seconds",
+    "probe_left_px",
+    "probe_top_px",
 ]
 
 

@@ -8,6 +8,7 @@
   - Python orchestrator running on the desktop
   - Owns session timing, active-app tracking, CSV writing, and runtime coordination
   - Collects app/context events, keyboard, mouse, notification, system metrics, and dual-task results
+  - Supports regular or random dual-task probe timing, with randomized screen position by default
 
 - `browser_agent_v2/`
   - Chrome extension

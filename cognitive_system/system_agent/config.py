@@ -124,6 +124,9 @@ class RuntimeConfig:
     dual_task_interval_mode: str = DUAL_TASK_INTERVAL_REGULAR
     dual_task_random_min_seconds: int = 15
     dual_task_random_max_seconds: int = 60
+    dual_task_randomize_position: bool = field(
+        default_factory=lambda: _shared_bool(True, "agent", "dual_task_randomize_position")
+    )
     keyboard_tracking_enabled: bool = True
     mouse_tracking_enabled: bool = True
     notification_tracking_enabled: bool = True
@@ -272,6 +275,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "DUAL_TASK_TIMEOUT_SECONDS",
             _shared_int(3, "agent", "dual_task_timeout_seconds"),
         ),
+    )
+    parser.add_argument(
+        "--dual-task-randomize-position",
+        action=argparse.BooleanOptionalAction,
+        default=_shared_bool(True, "agent", "dual_task_randomize_position"),
     )
     parser.add_argument(
         "--keyboard-tracking-enabled",
@@ -430,6 +438,7 @@ def build_runtime_config(argv: Sequence[str] | None = None) -> RuntimeConfig:
         dual_task_interval_mode=dual_interval_mode,
         dual_task_random_min_seconds=dual_random_min,
         dual_task_random_max_seconds=dual_random_max,
+        dual_task_randomize_position=bool(args.dual_task_randomize_position),
         keyboard_tracking_enabled=args.keyboard_tracking_enabled,
         mouse_tracking_enabled=args.mouse_tracking_enabled,
         notification_tracking_enabled=args.notification_tracking_enabled,

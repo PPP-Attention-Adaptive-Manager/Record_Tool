@@ -45,6 +45,7 @@ This file contains shared settings such as:
 - HTTP host and port
 - default mode
 - default session duration
+- dual-task timing and position behavior
 
 Important:
 
@@ -86,6 +87,7 @@ Useful notes:
 - the desktop application starts the local servers used by the extension
 - browser recording is controlled automatically by the desktop application
 - when the browser is no longer the foreground app, browser recording pauses
+- dual-task probes are randomized in timing and screen position by default
 
 ## Load The Extension
 

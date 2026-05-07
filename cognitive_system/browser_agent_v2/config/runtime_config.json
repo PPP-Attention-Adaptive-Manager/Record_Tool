@@ -17,6 +17,7 @@
     "dual_task_random_min_seconds": 15,
     "dual_task_random_max_seconds": 60,
     "dual_task_timeout_seconds": 3,
+    "dual_task_randomize_position": true,
     "keyboard_tracking_enabled": true,
     "mouse_tracking_enabled": true
   },
