@@ -91,6 +91,37 @@ class StartupLauncher:
         card.bind("<Configure>", _sync_scrollregion)
         canvas.bind("<Configure>", _resize_card)
 
+        def _mousewheel_scroll(event) -> str | None:
+            x1 = canvas.winfo_rootx()
+            y1 = canvas.winfo_rooty()
+            x2 = x1 + canvas.winfo_width()
+            y2 = y1 + canvas.winfo_height()
+            if not (x1 <= event.x_root <= x2 and y1 <= event.y_root <= y2):
+                return None
+
+            content_bounds = canvas.bbox("all")
+            if not content_bounds or content_bounds[3] <= canvas.winfo_height():
+                return "break"
+
+            if getattr(event, "num", None) == 4:
+                units = -3
+            elif getattr(event, "num", None) == 5:
+                units = 3
+            else:
+                delta = getattr(event, "delta", 0)
+                if not delta:
+                    return "break"
+                units = -int(delta / 120)
+                if units == 0:
+                    units = -1 if delta > 0 else 1
+
+            canvas.yview_scroll(units, "units")
+            return "break"
+
+        root.bind_all("<MouseWheel>", _mousewheel_scroll, add="+")
+        root.bind_all("<Button-4>", _mousewheel_scroll, add="+")
+        root.bind_all("<Button-5>", _mousewheel_scroll, add="+")
+
         mode_var = tk.StringVar(value=self.config.mode)
         duration_var = tk.StringVar(value=str(self.config.session_duration_minutes))
         csv_var = tk.BooleanVar(value=self.config.csv_enabled)
