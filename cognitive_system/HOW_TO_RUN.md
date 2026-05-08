@@ -72,6 +72,8 @@ The launcher lets the user choose:
 - dual-task interval timing
 - questionnaire enabled or disabled
 
+During an experimental session, `Ctrl+C` opens the questionnaire immediately even if the planned duration is not finished. `Ctrl+Shift+Q` remains available as a fallback shortcut.
+
 CLI fallback:
 
 ```powershell

@@ -459,7 +459,8 @@ class CognitiveSystemAgent:
             and session_id is not None
         )
         if should_open_questionnaire:
-            await self._request_questionnaire(session_id, mode="post_session")
+            if not self._awaiting_questionnaire:
+                await self._request_questionnaire(session_id, mode="post_session")
         else:
             self.data_writer.end_session()
 
@@ -679,12 +680,15 @@ class CognitiveSystemAgent:
                     )
 
             # GlobalHotKeys maps pynput key-combo strings to callbacks.
-            # "<ctrl>+<shift>+q" matches Ctrl+Shift+Q on all platforms.
+            # Keep Ctrl+Shift+Q as a fallback; Ctrl+C is the requested quick trigger.
             self._hotkey_listener = _pynput_kb.GlobalHotKeys(
-                {"<ctrl>+<shift>+q": _trigger}
+                {
+                    "<ctrl>+c": _trigger,
+                    "<ctrl>+<shift>+q": _trigger,
+                }
             )
             self._hotkey_listener.start()
-            LOGGER.info("Questionnaire hotkey registered: Ctrl+Shift+Q (pynput)")
+            LOGGER.info("Questionnaire hotkeys registered: Ctrl+C and Ctrl+Shift+Q (pynput)")
         except Exception as exc:
             LOGGER.warning("Could not register questionnaire hotkey: %s", exc)
             self._hotkey_listener = None
@@ -722,12 +726,13 @@ class CognitiveSystemAgent:
 
     async def run(self, *, wait_for_user_start: bool = True) -> None:
         self.loop = asyncio.get_running_loop()
+        open_questionnaire_on_shutdown = False
         try:
             await self.extension_server.start()
             self.app_tracker.start()
             if wait_for_user_start:
                 self._print_banner()
-            self._setup_questionnaire_hotkey()  # Part 5: Ctrl+Shift+Q
+            self._setup_questionnaire_hotkey()  # Part 5: Ctrl+C / Ctrl+Shift+Q
 
             if wait_for_user_start:
                 start = await self._wait_for_user_start()
@@ -738,7 +743,7 @@ class CognitiveSystemAgent:
             await self.start_session()
             if wait_for_user_start:
                 print("Session running. Recording pauses/resumes automatically with browser foreground.")
-                print("Use Ctrl+C to stop early.\n")
+                print("Use Ctrl+C to open the questionnaire and stop early.\n")
             else:
                 LOGGER.info("Session running with launcher-managed startup.")
 
@@ -746,9 +751,23 @@ class CognitiveSystemAgent:
                 await asyncio.sleep(0.5)
 
             await self._wait_for_questionnaire_if_needed()
+        except asyncio.CancelledError:
+            open_questionnaire_on_shutdown = (
+                self.session_manager.active
+                and self.config.is_experimental
+                and self.config.questionnaire_enabled
+            )
+            if open_questionnaire_on_shutdown:
+                LOGGER.info("Interrupt received; opening questionnaire before shutdown.")
+            raise
         finally:
             try:
-                await self.stop_session(reason="shutdown", open_questionnaire=False)
+                await self.stop_session(
+                    reason="shutdown",
+                    open_questionnaire=open_questionnaire_on_shutdown,
+                )
+                if open_questionnaire_on_shutdown:
+                    await self._wait_for_questionnaire_if_needed()
             except Exception:
                 pass
             await self._cancel_task(self._questionnaire_task)
