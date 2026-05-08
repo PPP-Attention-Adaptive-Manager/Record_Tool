@@ -46,6 +46,8 @@ Dual-task note:
 - `dual_task_random_min_seconds` and `dual_task_random_max_seconds` define the random interval range
 - `dual_task_randomize_position` randomizes where the probe window appears on screen
 
+Default dual-task timing is random between 180 and 360 seconds.
+
 If you enable Influx export, keep `INFLUXDB_TOKEN` in your environment.
 
 ## 3. Start The Desktop Application

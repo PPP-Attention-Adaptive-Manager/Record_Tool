@@ -121,9 +121,9 @@ class RuntimeConfig:
     questionnaire_enabled: bool
     dual_task_interval_seconds: int
     dual_task_timeout_seconds: int
-    dual_task_interval_mode: str = DUAL_TASK_INTERVAL_REGULAR
-    dual_task_random_min_seconds: int = 15
-    dual_task_random_max_seconds: int = 60
+    dual_task_interval_mode: str = DUAL_TASK_INTERVAL_RANDOM
+    dual_task_random_min_seconds: int = 180
+    dual_task_random_max_seconds: int = 360
     dual_task_randomize_position: bool = field(
         default_factory=lambda: _shared_bool(True, "agent", "dual_task_randomize_position")
     )
@@ -249,7 +249,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         choices=VALID_DUAL_TASK_INTERVAL_MODES,
         default=(
             os.environ.get("DUAL_TASK_INTERVAL_MODE")
-            or _shared_str(DUAL_TASK_INTERVAL_REGULAR, "agent", "dual_task_interval_mode")
+            or _shared_str(DUAL_TASK_INTERVAL_RANDOM, "agent", "dual_task_interval_mode")
         ),
     )
     parser.add_argument(
@@ -257,7 +257,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=int,
         default=_env_int(
             "DUAL_TASK_RANDOM_MIN_SECONDS",
-            _shared_int(15, "agent", "dual_task_random_min_seconds"),
+            _shared_int(180, "agent", "dual_task_random_min_seconds"),
         ),
     )
     parser.add_argument(
@@ -265,7 +265,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=int,
         default=_env_int(
             "DUAL_TASK_RANDOM_MAX_SECONDS",
-            _shared_int(60, "agent", "dual_task_random_max_seconds"),
+            _shared_int(360, "agent", "dual_task_random_max_seconds"),
         ),
     )
     parser.add_argument(
