@@ -15,12 +15,17 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
 
-from .windowing import WindowEngine
+from .context_model import (
+    context_from_json_series,
+    is_internal_app,
+    resolve_context_from_payload,
+    resolve_context_nodes_frame,
+    resolve_context_node,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,14 +59,43 @@ _EVENT_COLUMNS = [
     "tab_id",
     "node_id",
     "node_type",
+    "node_kind",
+    "label",
+    "domain",
+    "path",
+    "path_depth",
 ]
 
-_GLOBAL_NODE_COLUMNS = ["node_id", "node_type"]
-_GLOBAL_EDGE_COLUMNS = ["source", "target", "transition_count", "total_duration", "avg_duration"]
-_GLOBAL_TEMPORAL_COLUMNS = ["source", "target", "timestamp"]
-_WINDOW_NODE_COLUMNS = ["window_id", "node_id", "node_type"]
-_WINDOW_EDGE_COLUMNS = ["window_id", "source", "target", "transition_count", "total_duration", "avg_duration"]
-_WINDOW_TEMPORAL_COLUMNS = ["window_id", "source", "target", "timestamp"]
+_NODE_FEATURE_COLUMNS = [
+    "duration",
+    "scroll_intensity",
+    "scroll_depth",
+    "keystrokes",
+    "mouse_activity",
+    "revisit_count",
+    "switch_in",
+    "switch_out",
+    "idle_segments",
+]
+_NODE_METADATA_COLUMNS = [
+    "node_id",
+    "node_kind",
+    "node_type",
+    "label",
+    "title",
+    "url",
+    "domain",
+    "path",
+    "path_depth",
+    "app_name",
+    "window_title",
+]
+_GLOBAL_NODE_COLUMNS = [*_NODE_METADATA_COLUMNS, *_NODE_FEATURE_COLUMNS]
+_GLOBAL_EDGE_COLUMNS = ["source", "target", "edge_type", "transition_count", "total_duration", "avg_duration"]
+_GLOBAL_TEMPORAL_COLUMNS = ["source", "target", "edge_type", "timestamp"]
+_WINDOW_NODE_COLUMNS = ["window_id", *_GLOBAL_NODE_COLUMNS]
+_WINDOW_EDGE_COLUMNS = ["window_id", *_GLOBAL_EDGE_COLUMNS]
+_WINDOW_TEMPORAL_COLUMNS = ["window_id", *_GLOBAL_TEMPORAL_COLUMNS]
 
 
 @dataclass(frozen=True)
@@ -88,7 +122,6 @@ class GraphBuilder:
 
     def __init__(self, node_level: Literal["app", "domain", "url"] = "app") -> None:
         self.config = GraphConfig(node_level=node_level)
-        self._engine = WindowEngine()
 
     def clean_events(self, behavior_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -122,6 +155,7 @@ class GraphBuilder:
         )
         df = df[df["event_type"].isin(_CANONICAL_EVENT_TYPES)].copy()
         df = df.dropna(subset=["timestamp"])
+        df = df[~df["app_name"].map(is_internal_app)].copy()
         if df.empty:
             return pd.DataFrame(columns=_EVENT_COLUMNS)
 
@@ -183,6 +217,9 @@ class GraphBuilder:
         grouped["url"] = grouped["url"].replace("", pd.NA)
         grouped["app_name"] = grouped["app_name"].fillna("unknown")
         grouped["url"] = grouped["url"].fillna("")
+        grouped = grouped[grouped["duration_ms"].gt(0)].copy()
+        if grouped.empty:
+            return pd.DataFrame(columns=_EVENT_COLUMNS)
 
         node_frame = self._resolve_nodes(grouped)
         cleaned = pd.concat([grouped, node_frame], axis=1)
@@ -195,18 +232,28 @@ class GraphBuilder:
     def build(
         self,
         behavior_df: pd.DataFrame,
+        keyboard_df: pd.DataFrame | None = None,
+        mouse_df: pd.DataFrame | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Clean a behavior stream and return:
           cleaned_events, nodes.csv DataFrame, edges.csv DataFrame, temporal_edges.csv DataFrame
         """
         events_df = self.clean_events(behavior_df)
-        nodes_df, edges_df, temporal_edges_df = self.build_from_events(events_df)
+        nodes_df, edges_df, temporal_edges_df = self.build_from_events(
+            events_df,
+            behavior_df=behavior_df,
+            keyboard_df=keyboard_df,
+            mouse_df=mouse_df,
+        )
         return events_df, nodes_df, edges_df, temporal_edges_df
 
     def build_from_events(
         self,
         events_df: pd.DataFrame,
+        behavior_df: pd.DataFrame | None = None,
+        keyboard_df: pd.DataFrame | None = None,
+        mouse_df: pd.DataFrame | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Build graph tables from a cleaned event table."""
         if events_df is None or events_df.empty:
@@ -216,24 +263,35 @@ class GraphBuilder:
                 pd.DataFrame(columns=_GLOBAL_TEMPORAL_COLUMNS),
             )
 
-        nodes_df = (
-            events_df[["node_id", "node_type"]]
-            .drop_duplicates(subset=["node_id"])
-            .sort_values("node_id")
-            .reset_index(drop=True)
-        )
-
-        transitions = self._build_temporal_transitions(events_df)
-        if transitions.empty:
+        events_df = events_df.copy()
+        events_df["duration_ms"] = pd.to_numeric(events_df.get("duration_ms"), errors="coerce").fillna(0.0)
+        events_df = events_df[events_df["duration_ms"].gt(0)].reset_index(drop=True)
+        if events_df.empty:
             return (
-                nodes_df,
+                pd.DataFrame(columns=_GLOBAL_NODE_COLUMNS),
                 pd.DataFrame(columns=_GLOBAL_EDGE_COLUMNS),
                 pd.DataFrame(columns=_GLOBAL_TEMPORAL_COLUMNS),
             )
 
-        temporal_edges_df = transitions[["source", "target", "timestamp"]].reset_index(drop=True)
+        transitions = self._build_temporal_transitions(events_df)
+        node_features = self._build_node_feature_table(
+            events_df=events_df,
+            transitions=transitions,
+            behavior_df=behavior_df,
+            keyboard_df=keyboard_df,
+            mouse_df=mouse_df,
+        )
+
+        if transitions.empty:
+            return (
+                node_features,
+                pd.DataFrame(columns=_GLOBAL_EDGE_COLUMNS),
+                pd.DataFrame(columns=_GLOBAL_TEMPORAL_COLUMNS),
+            )
+
+        temporal_edges_df = transitions[["source", "target", "edge_type", "timestamp"]].reset_index(drop=True)
         edges_df = (
-            transitions.groupby(["source", "target"], as_index=False)
+            transitions.groupby(["source", "target", "edge_type"], as_index=False)
             .agg(
                 transition_count=("timestamp", "size"),
                 total_duration=("duration_ms", "sum"),
@@ -242,12 +300,15 @@ class GraphBuilder:
         )
         edges_df["total_duration"] = edges_df["total_duration"].round(2)
         edges_df["avg_duration"] = edges_df["avg_duration"].round(2)
-        return nodes_df, edges_df[_GLOBAL_EDGE_COLUMNS], temporal_edges_df[_GLOBAL_TEMPORAL_COLUMNS]
+        return node_features, edges_df[_GLOBAL_EDGE_COLUMNS], temporal_edges_df[_GLOBAL_TEMPORAL_COLUMNS]
 
     def build_windowed(
         self,
         events_df: pd.DataFrame,
         windows_df: pd.DataFrame,
+        behavior_df: pd.DataFrame | None = None,
+        keyboard_df: pd.DataFrame | None = None,
+        mouse_df: pd.DataFrame | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Build per-window event-transition graphs while keeping events, not
@@ -265,22 +326,30 @@ class GraphBuilder:
                 pd.DataFrame(columns=_WINDOW_TEMPORAL_COLUMNS),
             )
 
-        timestamps = events_df["timestamp"].to_numpy(dtype=float, copy=False)
+        sorted_behavior = _sort_by_timestamp(behavior_df)
+        sorted_keyboard = _sort_by_timestamp(keyboard_df)
+        sorted_mouse = _sort_by_timestamp(mouse_df)
         window_nodes: list[pd.DataFrame] = []
         window_edges: list[pd.DataFrame] = []
         window_temporal_edges: list[pd.DataFrame] = []
 
         for window in windows_df.itertuples(index=False):
-            lo, hi = self._engine.window_slice_indices(
-                timestamps,
-                float(window.window_start),
-                float(window.window_end),
-            )
-            window_events = events_df.iloc[lo:hi].reset_index(drop=True)
+            window_start = float(window.window_start)
+            window_end = float(window.window_end)
+            window_events = self.slice_events_for_window(events_df, window_start, window_end)
             if window_events.empty:
                 continue
 
-            nodes_df, edges_df, temporal_edges_df = self.build_from_events(window_events)
+            behavior_slice = _slice_timestamp_frame(sorted_behavior, window_start, window_end)
+            keyboard_slice = _slice_timestamp_frame(sorted_keyboard, window_start, window_end)
+            mouse_slice = _slice_timestamp_frame(sorted_mouse, window_start, window_end)
+
+            nodes_df, edges_df, temporal_edges_df = self.build_from_events(
+                window_events,
+                behavior_df=behavior_slice,
+                keyboard_df=keyboard_slice,
+                mouse_df=mouse_slice,
+            )
 
             if not nodes_df.empty:
                 nodes_df = nodes_df.copy()
@@ -302,6 +371,33 @@ class GraphBuilder:
             _concat_or_empty(window_edges, _WINDOW_EDGE_COLUMNS),
             _concat_or_empty(window_temporal_edges, _WINDOW_TEMPORAL_COLUMNS),
         )
+
+    @staticmethod
+    def slice_events_for_window(events_df: pd.DataFrame, window_start: float, window_end: float) -> pd.DataFrame:
+        """Return context intervals overlapping a window, with duration clipped to the window."""
+        if events_df is None or events_df.empty:
+            return pd.DataFrame(columns=_EVENT_COLUMNS)
+
+        events = events_df.copy()
+        for col in ("start_time", "end_time", "timestamp", "duration_ms"):
+            if col in events.columns:
+                events[col] = pd.to_numeric(events[col], errors="coerce")
+        events["start_time"] = events.get("start_time", events.get("timestamp")).fillna(events.get("timestamp"))
+        events["end_time"] = events.get("end_time", events.get("timestamp")).fillna(events.get("timestamp"))
+        mask = events["start_time"].lt(window_end) & events["end_time"].gt(window_start)
+        events = events[mask].copy()
+        if events.empty:
+            return events.reset_index(drop=True)
+
+        clipped_start = np.maximum(events["start_time"].to_numpy(dtype=float), float(window_start))
+        clipped_end = np.minimum(events["end_time"].to_numpy(dtype=float), float(window_end))
+        clipped_duration_ms = np.maximum(0.0, clipped_end - clipped_start) * 1_000.0
+        events["start_time"] = clipped_start
+        events["end_time"] = clipped_end
+        events["timestamp"] = clipped_end
+        events["duration_ms"] = clipped_duration_ms.round(2)
+        events = events[events["duration_ms"].gt(0)].copy()
+        return events.sort_values(["start_time", "end_time", "timestamp"]).reset_index(drop=True)
 
     def export(
         self,
@@ -344,46 +440,230 @@ class GraphBuilder:
         )
 
     def _resolve_nodes(self, events_df: pd.DataFrame) -> pd.DataFrame:
-        app_names = events_df["app_name"].fillna("").astype(str).str.strip()
-        urls = events_df["url"].fillna("").astype(str).str.strip()
-        domains = urls.map(_extract_domain)
+        nodes = resolve_context_nodes_frame(events_df)
+        return nodes[["node_id", "node_type", "node_kind", "label", "domain", "path", "path_depth"]]
 
-        if self.config.node_level == "app":
-            node_id = app_names.where(app_names.ne(""), domains.fillna("unknown"))
-            node_type = np.where(app_names.ne(""), "app", np.where(domains.notna(), "domain", "unknown"))
-        elif self.config.node_level == "domain":
-            node_id = domains.where(domains.notna() & domains.ne(""), app_names)
-            node_type = np.where(domains.notna() & domains.ne(""), "domain", "app")
-        else:
-            node_id = urls.where(urls.ne(""), app_names)
-            node_type = np.where(urls.ne(""), "url", "app")
-
-        node_id = (
-            pd.Series(node_id, index=events_df.index)
-            .fillna("unknown")
-            .astype(str)
-            .str.strip()
-            .replace("", "unknown")
+    def _build_node_feature_table(
+        self,
+        events_df: pd.DataFrame,
+        transitions: pd.DataFrame,
+        behavior_df: pd.DataFrame | None,
+        keyboard_df: pd.DataFrame | None,
+        mouse_df: pd.DataFrame | None,
+    ) -> pd.DataFrame:
+        metadata = (
+            events_df.groupby("node_id", as_index=False)
+            .agg(
+                node_kind=("node_kind", _first_non_blank),
+                node_type=("node_type", _first_non_blank),
+                label=("label", _first_non_blank),
+                title=("title", _first_non_blank),
+                url=("url", _first_non_blank),
+                domain=("domain", _first_non_blank),
+                path=("path", _first_non_blank),
+                path_depth=("path_depth", "max"),
+                app_name=("app_name", _first_non_blank),
+                window_title=("window_title", _first_non_blank),
+                duration_ms=("duration_ms", "sum"),
+                interval_count=("node_id", "size"),
+            )
         )
-        node_type = pd.Series(node_type, index=events_df.index).fillna("unknown").astype(str)
 
-        return pd.DataFrame({"node_id": node_id, "node_type": node_type})
+        metadata["duration"] = (pd.to_numeric(metadata["duration_ms"], errors="coerce").fillna(0.0) / 1_000.0).round(3)
+        metadata["revisit_count"] = pd.to_numeric(metadata["interval_count"], errors="coerce").fillna(0).astype(int)
+        browser_node_mask = metadata["node_kind"].astype(str).isin({"tab", "page"})
+        metadata.loc[browser_node_mask, "app_name"] = ""
+
+        idle_events = events_df[events_df["app_name"].fillna("").astype(str).str.lower().eq("idle")]
+        idle_map = idle_events.groupby("node_id").size().to_dict() if not idle_events.empty else {}
+        metadata["idle_segments"] = metadata["node_id"].map(lambda node_id: int(idle_map.get(node_id, 0)))
+
+        transition_rows = transitions[transitions.get("edge_type", pd.Series(dtype=str)).eq("transition")]
+        switch_in = transition_rows.groupby("target").size().to_dict() if not transition_rows.empty else {}
+        switch_out = transition_rows.groupby("source").size().to_dict() if not transition_rows.empty else {}
+        metadata["switch_in"] = metadata["node_id"].map(lambda node_id: int(switch_in.get(node_id, 0)))
+        metadata["switch_out"] = metadata["node_id"].map(lambda node_id: int(switch_out.get(node_id, 0)))
+
+        scroll_features = self._build_scroll_feature_map(behavior_df, events_df)
+        keystroke_counts = self._build_keyboard_count_map(keyboard_df, events_df)
+        mouse_counts = self._build_mouse_count_map(mouse_df, events_df)
+
+        duration_by_node = metadata.set_index("node_id")["duration"].to_dict()
+        metadata["scroll_intensity"] = metadata["node_id"].map(
+            lambda node_id: round(
+                float(scroll_features.get(node_id, {}).get("scroll_total", 0.0))
+                / max(float(duration_by_node.get(node_id, 0.0)), 0.001),
+                4,
+            )
+        )
+        metadata["scroll_depth"] = metadata["node_id"].map(
+            lambda node_id: round(float(scroll_features.get(node_id, {}).get("scroll_depth", 0.0)), 4)
+        )
+        metadata["keystrokes"] = metadata["node_id"].map(lambda node_id: int(keystroke_counts.get(node_id, 0)))
+        metadata["mouse_activity"] = metadata["node_id"].map(lambda node_id: int(mouse_counts.get(node_id, 0)))
+
+        metadata["path_depth"] = pd.to_numeric(metadata["path_depth"], errors="coerce").fillna(0).astype(int)
+        return metadata[_GLOBAL_NODE_COLUMNS].sort_values(["node_kind", "label", "node_id"]).reset_index(drop=True)
+
+    def _build_scroll_feature_map(
+        self,
+        behavior_df: pd.DataFrame | None,
+        events_df: pd.DataFrame,
+    ) -> dict[str, dict[str, float]]:
+        if behavior_df is None or behavior_df.empty or "timestamp" not in behavior_df.columns:
+            return {}
+
+        scrolls = behavior_df.copy()
+        scrolls["event_type"] = scrolls.get("event_type", pd.Series(dtype=str)).fillna("").astype(str)
+        scrolls = scrolls[scrolls["event_type"].str.contains("scroll", case=False, na=False)].copy()
+        if scrolls.empty:
+            return {}
+
+        scrolls["timestamp"] = pd.to_numeric(scrolls["timestamp"], errors="coerce")
+        scrolls = scrolls.dropna(subset=["timestamp"]).copy()
+        if "app_name" not in scrolls.columns:
+            scrolls["app_name"] = ""
+        scrolls = scrolls[~scrolls["app_name"].map(is_internal_app)].copy()
+        if scrolls.empty:
+            return {}
+
+        scrolls["node_id"] = self._resolve_row_nodes_with_interval_fallback(scrolls, events_df)
+        scrolls = scrolls[scrolls["node_id"].astype(str).str.len().gt(0)].copy()
+        if scrolls.empty:
+            return {}
+
+        scrolls["scroll_delta_y"] = pd.to_numeric(
+            scrolls.get("scroll_delta_y", pd.Series(dtype=float)),
+            errors="coerce",
+        ).fillna(0.0)
+        scrolls["scroll_total_y"] = pd.to_numeric(
+            scrolls.get("scroll_total_y", pd.Series(dtype=float)),
+            errors="coerce",
+        ).fillna(0.0)
+        grouped = (
+            scrolls.groupby("node_id")
+            .agg(
+                scroll_total=("scroll_delta_y", lambda values: float(values.abs().sum())),
+                scroll_depth=("scroll_total_y", lambda values: float(values.abs().max()) if len(values) else 0.0),
+            )
+        )
+        return grouped.to_dict(orient="index")
+
+    def _build_keyboard_count_map(
+        self,
+        keyboard_df: pd.DataFrame | None,
+        events_df: pd.DataFrame,
+    ) -> dict[str, int]:
+        if keyboard_df is None or keyboard_df.empty or "timestamp" not in keyboard_df.columns:
+            return {}
+        keys = keyboard_df.copy()
+        keys["timestamp"] = pd.to_numeric(keys["timestamp"], errors="coerce")
+        keys = keys.dropna(subset=["timestamp"]).copy()
+        if "event_type" in keys.columns:
+            keys = keys[keys["event_type"].fillna("").astype(str).str.lower().eq("key_press")].copy()
+        if keys.empty:
+            return {}
+        keys["node_id"] = self._resolve_context_json_nodes_with_interval_fallback(keys, events_df)
+        keys = keys[keys["node_id"].astype(str).str.len().gt(0)]
+        return keys.groupby("node_id").size().astype(int).to_dict() if not keys.empty else {}
+
+    def _build_mouse_count_map(
+        self,
+        mouse_df: pd.DataFrame | None,
+        events_df: pd.DataFrame,
+    ) -> dict[str, int]:
+        if mouse_df is None or mouse_df.empty or "timestamp" not in mouse_df.columns:
+            return {}
+        mouse = mouse_df.copy()
+        mouse["timestamp"] = pd.to_numeric(mouse["timestamp"], errors="coerce")
+        mouse = mouse.dropna(subset=["timestamp"]).copy()
+        if mouse.empty:
+            return {}
+        mouse["node_id"] = self._resolve_context_json_nodes_with_interval_fallback(mouse, events_df)
+        mouse = mouse[mouse["node_id"].astype(str).str.len().gt(0)]
+        return mouse.groupby("node_id").size().astype(int).to_dict() if not mouse.empty else {}
+
+    def _resolve_row_nodes_with_interval_fallback(
+        self,
+        rows: pd.DataFrame,
+        events_df: pd.DataFrame,
+    ) -> pd.Series:
+        valid_nodes = set(events_df["node_id"].fillna("").astype(str))
+        fallback = _build_interval_node_lookup(events_df)
+        node_ids: list[str] = []
+        for row in rows.to_dict("records"):
+            resolved = resolve_context_node(
+                app_name=row.get("app_name", ""),
+                url=row.get("url", ""),
+                title=row.get("title", ""),
+                window_title=row.get("window_title", ""),
+                tab_id=row.get("tab_id", ""),
+            )
+            node_id = str(resolved.get("node_id", ""))
+            if node_id not in valid_nodes:
+                node_id = fallback(float(row.get("timestamp", np.nan)))
+            node_ids.append(node_id if node_id in valid_nodes else "")
+        return pd.Series(node_ids, index=rows.index)
+
+    def _resolve_context_json_nodes_with_interval_fallback(
+        self,
+        rows: pd.DataFrame,
+        events_df: pd.DataFrame,
+    ) -> pd.Series:
+        valid_nodes = set(events_df["node_id"].fillna("").astype(str))
+        fallback = _build_interval_node_lookup(events_df)
+        contexts = context_from_json_series(rows.get("context", pd.Series(dtype=str)))
+        node_ids: list[str] = []
+        for pos, row in enumerate(rows.to_dict("records")):
+            context = contexts.iloc[pos].to_dict() if pos < len(contexts) else {}
+            app_name = context.get("active_app") or context.get("app_name") or ""
+            if is_internal_app(app_name):
+                node_ids.append("")
+                continue
+            resolved = resolve_context_from_payload(context)
+            node_id = str(resolved.get("node_id", ""))
+            if node_id not in valid_nodes:
+                node_id = fallback(float(row.get("timestamp", np.nan)))
+            node_ids.append(node_id if node_id in valid_nodes else "")
+        return pd.Series(node_ids, index=rows.index)
 
     @staticmethod
     def _build_temporal_transitions(events_df: pd.DataFrame) -> pd.DataFrame:
-        if events_df is None or len(events_df) < 2:
-            return pd.DataFrame(columns=["source", "target", "timestamp", "duration_ms"])
+        if events_df is None or events_df.empty:
+            return pd.DataFrame(columns=["source", "target", "edge_type", "timestamp", "duration_ms"])
+
+        events = events_df.copy().reset_index(drop=True)
+        events["duration_ms"] = pd.to_numeric(events.get("duration_ms"), errors="coerce").fillna(0.0)
+
+        persistence = pd.DataFrame(
+            {
+                "source": events["node_id"],
+                "target": events["node_id"],
+                "edge_type": "persistence",
+                "timestamp": pd.to_numeric(events.get("start_time", events["timestamp"]), errors="coerce").fillna(
+                    pd.to_numeric(events["timestamp"], errors="coerce")
+                ),
+                "duration_ms": events["duration_ms"],
+            }
+        )
+        persistence = persistence[persistence["duration_ms"].gt(0)]
+
+        if len(events) < 2:
+            return persistence.dropna(subset=["source", "target"]).reset_index(drop=True)
 
         transitions = pd.DataFrame(
             {
-                "source": events_df["node_id"],
-                "target": events_df["node_id"].shift(-1),
-                "timestamp": events_df["timestamp"],
-                "duration_ms": events_df["duration_ms"],
+                "source": events["node_id"],
+                "target": events["node_id"].shift(-1),
+                "edge_type": "transition",
+                "timestamp": pd.to_numeric(events["timestamp"], errors="coerce"),
+                "duration_ms": events["duration_ms"],
             }
         )
         transitions = transitions.iloc[:-1].dropna(subset=["source", "target"])
-        return transitions.reset_index(drop=True)
+        transitions = transitions[transitions["source"].astype(str) != transitions["target"].astype(str)]
+        combined = pd.concat([persistence, transitions], ignore_index=True)
+        return combined.dropna(subset=["source", "target"]).reset_index(drop=True)
 
 
 def _first_non_blank(series: pd.Series) -> str:
@@ -393,18 +673,46 @@ def _first_non_blank(series: pd.Series) -> str:
     return str(non_blank.iloc[0]).strip()
 
 
-def _extract_domain(url: str) -> str | None:
-    text = str(url or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = urlparse(text if "://" in text else f"//{text}")
-        domain = (parsed.netloc or parsed.path.split("/", 1)[0]).strip().lower()
-    except Exception:
-        return None
-    if not domain:
-        return None
-    return domain.split(":", 1)[0] or None
+def _build_interval_node_lookup(events_df: pd.DataFrame):
+    if events_df is None or events_df.empty:
+        return lambda _timestamp: ""
+
+    events = events_df.copy()
+    events["start_time"] = pd.to_numeric(events.get("start_time"), errors="coerce")
+    events["end_time"] = pd.to_numeric(events.get("end_time"), errors="coerce")
+    events = events.dropna(subset=["start_time", "end_time", "node_id"]).sort_values("end_time")
+    starts = events["start_time"].to_numpy(dtype=float, copy=False)
+    ends = events["end_time"].to_numpy(dtype=float, copy=False)
+    node_ids = events["node_id"].astype(str).to_numpy(copy=False)
+
+    def _lookup(timestamp: float) -> str:
+        if np.isnan(timestamp) or len(ends) == 0:
+            return ""
+        idx = int(np.searchsorted(ends, timestamp, side="left"))
+        if idx >= len(ends):
+            idx = len(ends) - 1
+        if starts[idx] <= timestamp <= ends[idx]:
+            return str(node_ids[idx])
+        return ""
+
+    return _lookup
+
+
+def _sort_by_timestamp(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return pd.DataFrame()
+    out = df.copy()
+    out["timestamp"] = pd.to_numeric(out["timestamp"], errors="coerce")
+    return out.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+
+def _slice_timestamp_frame(df: pd.DataFrame, window_start: float, window_end: float) -> pd.DataFrame:
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return pd.DataFrame(columns=df.columns if df is not None else [])
+    timestamps = df["timestamp"].to_numpy(dtype=float, copy=False)
+    lo = int(np.searchsorted(timestamps, float(window_start), side="left"))
+    hi = int(np.searchsorted(timestamps, float(window_end), side="left"))
+    return df.iloc[lo:hi].reset_index(drop=True)
 
 
 def _concat_or_empty(frames: list[pd.DataFrame], columns: list[str]) -> pd.DataFrame:

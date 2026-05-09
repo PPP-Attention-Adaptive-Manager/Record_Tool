@@ -103,7 +103,7 @@ class WindowGraphView:
 
     @property
     def tab_node_count(self) -> int:
-        return sum(1 for node in self.nodes if node.node_kind == "tab")
+        return sum(1 for node in self.nodes if node.node_kind in {"tab", "page"})
 
 
 @dataclass
@@ -166,38 +166,47 @@ def load_session_bundle(
                 error=f"No windows available for label '{window_label}'.",
             )
 
-        event_ts = cleaned_events["timestamp"].to_numpy(dtype=float, copy=False) if not cleaned_events.empty else []
         raw_ts = behavior_df["timestamp"].to_numpy(dtype=float, copy=False)
+        keyboard_df = raw_streams.get("keyboard", pd.DataFrame())
+        mouse_df = raw_streams.get("mouse", pd.DataFrame())
+        keyboard_ts = keyboard_df["timestamp"].to_numpy(dtype=float, copy=False) if not keyboard_df.empty and "timestamp" in keyboard_df.columns else []
+        mouse_ts = mouse_df["timestamp"].to_numpy(dtype=float, copy=False) if not mouse_df.empty and "timestamp" in mouse_df.columns else []
         engine = WindowEngine()
 
         window_graphs: list[WindowGraphView] = []
         for window_row in windows_df.itertuples(index=False):
             feature_row = window_feature_map.get(window_row.window_id, {})
-            if len(event_ts):
-                ev_lo, ev_hi = engine.window_slice_indices(
-                    event_ts,
-                    float(window_row.window_start),
-                    float(window_row.window_end),
-                )
-                window_events = cleaned_events.iloc[ev_lo:ev_hi].copy()
-            else:
-                window_events = pd.DataFrame(columns=cleaned_events.columns)
+            window_start = float(window_row.window_start)
+            window_end = float(window_row.window_end)
+            window_events = cleaner.slice_events_for_window(cleaned_events, window_start, window_end)
 
             raw_lo, raw_hi = engine.window_slice_indices(
                 raw_ts,
-                float(window_row.window_start),
-                float(window_row.window_end),
+                window_start,
+                window_end,
             )
             raw_slice = behavior_df.iloc[raw_lo:raw_hi].copy()
+            if len(keyboard_ts):
+                key_lo, key_hi = engine.window_slice_indices(keyboard_ts, window_start, window_end)
+                keyboard_slice = keyboard_df.iloc[key_lo:key_hi].copy()
+            else:
+                keyboard_slice = pd.DataFrame()
+            if len(mouse_ts):
+                mouse_lo, mouse_hi = engine.window_slice_indices(mouse_ts, window_start, window_end)
+                mouse_slice = mouse_df.iloc[mouse_lo:mouse_hi].copy()
+            else:
+                mouse_slice = pd.DataFrame()
 
             window_graphs.append(
                 _build_window_graph(
                     session_id=session_dir.name,
                     window_id=str(window_row.window_id),
-                    window_start=float(window_row.window_start),
-                    window_end=float(window_row.window_end),
+                    window_start=window_start,
+                    window_end=window_end,
                     window_events=window_events,
                     raw_behavior_slice=raw_slice,
+                    raw_keyboard_slice=keyboard_slice,
+                    raw_mouse_slice=mouse_slice,
                     tab_level=tab_level,
                     window_features=feature_row,
                     node_feature_map=node_feature_map,
@@ -987,6 +996,8 @@ def _build_window_graph(
     window_end: float,
     window_events: pd.DataFrame,
     raw_behavior_slice: pd.DataFrame,
+    raw_keyboard_slice: pd.DataFrame,
+    raw_mouse_slice: pd.DataFrame,
     tab_level: str,
     window_features: dict[str, object],
     node_feature_map: dict[tuple[str, str, str], dict[str, object]],
@@ -1002,185 +1013,69 @@ def _build_window_graph(
             window_features=window_features,
         )
 
-    events = window_events.copy()
-    events["app_name"] = events["app_name"].fillna("unknown").astype(str).str.strip().replace("", "unknown")
-    events["url"] = events["url"].fillna("").astype(str).str.strip()
-    events["tab_node_id"] = events["url"].map(lambda value: _resolve_tab_id(value, tab_level))
-
-    window_duration = max(0.001, window_end - window_start)
-
-    app_transitions = _build_transition_table(events["app_name"], events["timestamp"], events["duration_ms"])
-    tab_transitions = _build_transition_table(
-        events["tab_node_id"],
-        events["timestamp"],
-        events["duration_ms"],
-        require_non_empty=True,
+    builder = GraphBuilder(node_level="app")
+    nodes_df, edges_df, _ = builder.build_from_events(
+        window_events,
+        behavior_df=raw_behavior_slice,
+        keyboard_df=raw_keyboard_slice,
+        mouse_df=raw_mouse_slice,
     )
-    app_tab_links = _build_app_tab_links(events)
-
-    app_node_rows = _build_app_nodes(
-        events=events,
-        app_transitions=app_transitions,
-        app_tab_links=app_tab_links,
-        window_start=window_start,
-        window_end=window_end,
-    )
-    tab_node_rows = _build_tab_nodes(
-        events=events,
-        raw_behavior_slice=raw_behavior_slice,
-        tab_transitions=tab_transitions,
-        app_tab_links=app_tab_links,
-        tab_level=tab_level,
-        window_end=window_end,
-        window_duration=window_duration,
-    )
-
-    app_feature_map = {row["node_label"]: row for row in app_node_rows}
-    tab_feature_map = {row["node_label"]: row for row in tab_node_rows}
+    if nodes_df.empty:
+        return WindowGraphView(
+            session_id=session_id,
+            window_id=window_id,
+            window_start=window_start,
+            window_end=window_end,
+            nodes=[],
+            edges=[],
+            window_features=window_features,
+        )
 
     nodes: list[GraphNodeView] = []
-    for row in app_node_rows:
-        label = str(row["node_label"])
+    node_label_map: dict[str, str] = {}
+    for _, row in nodes_df.iterrows():
+        node_id = str(row.get("node_id", ""))
+        node_kind = str(row.get("node_kind") or row.get("node_type") or "app")
+        label = str(row.get("label") or node_id)
+        node_label_map[node_id] = label
+        features = _build_context_feature_payload(
+            row=row.to_dict(),
+            window_id=window_id,
+            node_id=node_id,
+            node_type=node_kind,
+            node_feature_map=node_feature_map,
+        )
         nodes.append(
             GraphNodeView(
-                key=f"app::{label}",
+                key=node_id,
                 label=label,
-                node_kind="app",
-                feature_node_type="app",
-                feature_node_id=label,
-                features=_build_app_feature_payload(
-                    base_features={
-                    "type_app": row["type_app"],
-                    "role": row["role"],
-                    "usage_time": row["usage_time"],
-                    "frequency": row["frequency"],
-                    "recency": row["recency"],
-                    "task_affiliation": row["task_affiliation"],
-                    "centrality": row["centrality"],
-                    "switch_in": row["switch_in"],
-                    "switch_out": row["switch_out"],
-                    },
-                    window_id=window_id,
-                    node_id=label,
-                    node_feature_map=node_feature_map,
-                ),
+                node_kind=node_kind,
+                feature_node_type=node_kind,
+                feature_node_id=node_id,
+                features=features,
             )
         )
-
-    for row in tab_node_rows:
-        label = str(row["node_label"])
-        nodes.append(
-            GraphNodeView(
-                key=f"tab::{label}",
-                label=label,
-                node_kind="tab",
-                feature_node_type=tab_level,
-                feature_node_id=label,
-                features=_build_tab_feature_payload(
-                    base_features={
-                    "type_site": row["type_site"],
-                    "role": row["role"],
-                    "dwell_time": row["dwell_time"],
-                    "frequency": row["frequency"],
-                    "recency": row["recency"],
-                    "scroll_speed": row["scroll_speed"],
-                    "scroll_depth": row["scroll_depth"],
-                    "tab_switch_rate": row["tab_switch_rate"],
-                    "content_stability": row["content_stability"],
-                    },
-                    window_id=window_id,
-                    node_id=label,
-                    node_type=tab_level,
-                    node_feature_map=node_feature_map,
-                ),
-            )
-        )
-
-    total_node_count = max(1, len(nodes))
-    centrality_map = _compute_node_centrality(
-        node_count=total_node_count,
-        app_transitions=app_transitions,
-        tab_transitions=tab_transitions,
-        app_tab_links=app_tab_links,
-        app_feature_map=app_feature_map,
-        tab_feature_map=tab_feature_map,
-    )
-    for node in nodes:
-        node.features["centrality"] = centrality_map.get(node.key, node.features.get("centrality"))
-
-    app_edge_rows = _build_app_edges(
-        app_transitions=app_transitions,
-        app_feature_map=app_feature_map,
-        window_duration=window_duration,
-        events=events,
-    )
-    tab_edge_rows = _build_tab_edges(
-        tab_transitions=tab_transitions,
-        tab_feature_map=tab_feature_map,
-        window_duration=window_duration,
-    )
-    app_tab_edge_rows = _build_app_tab_edges(
-        app_tab_links=app_tab_links,
-        app_feature_map=app_feature_map,
-        tab_feature_map=tab_feature_map,
-    )
 
     edges: list[GraphEdgeView] = []
-    for row in app_edge_rows:
+    for _, row in edges_df.iterrows():
+        source = str(row.get("source", ""))
+        target = str(row.get("target", ""))
+        edge_type = str(row.get("edge_type", "transition"))
+        source_label = node_label_map.get(source, source)
+        target_label = node_label_map.get(target, target)
         edges.append(
             GraphEdgeView(
-                edge_id=f"app_app::{row['source']}::{row['target']}",
-                source_key=f"app::{row['source']}",
-                target_key=f"app::{row['target']}",
-                source_label=str(row["source"]),
-                target_label=str(row["target"]),
-                edge_kind="app_app",
+                edge_id=f"{edge_type}::{source}::{target}",
+                source_key=source,
+                target_key=target,
+                source_label=source_label,
+                target_label=target_label,
+                edge_kind=edge_type,
                 features={
-                    "transition_count": row["transition_count"],
-                    "transition_rate": row["transition_rate"],
-                    "semantic_distance": row["semantic_distance"],
-                    "task_similarity": row["task_similarity"],
-                    "interruption_cost": row["interruption_cost"],
-                    "resume_latency": row["resume_latency"],
-                    "directionality": row["directionality"],
-                },
-            )
-        )
-
-    for row in tab_edge_rows:
-        edges.append(
-            GraphEdgeView(
-                edge_id=f"tab_tab::{row['source']}::{row['target']}",
-                source_key=f"tab::{row['source']}",
-                target_key=f"tab::{row['target']}",
-                source_label=str(row["source"]),
-                target_label=str(row["target"]),
-                edge_kind="tab_tab",
-                features={
-                    "switch_count": row["switch_count"],
-                    "switch_rate": row["switch_rate"],
-                    "semantic_gap": row["semantic_gap"],
-                    "task_continuity": row["task_continuity"],
-                    "navigation_pattern": row["navigation_pattern"],
-                },
-            )
-        )
-
-    for row in app_tab_edge_rows:
-        edges.append(
-            GraphEdgeView(
-                edge_id=f"app_tab::{row['source']}::{row['target']}",
-                source_key=f"app::{row['source']}",
-                target_key=f"tab::{row['target']}",
-                source_label=str(row["source"]),
-                target_label=str(row["target"]),
-                edge_kind="app_tab",
-                features={
-                    "latency": row["latency"],
-                    "copy_paste": row["copy_paste"],
-                    "sequence_pattern": row["sequence_pattern"],
-                    "semantic_alignment": row["semantic_alignment"],
-                    "usage_dependency": row["usage_dependency"],
+                    "edge_type": edge_type,
+                    "transition_count": row.get("transition_count"),
+                    "total_duration": row.get("total_duration"),
+                    "avg_duration": row.get("avg_duration"),
                 },
             )
         )
@@ -1194,6 +1089,38 @@ def _build_window_graph(
         edges=edges,
         window_features=window_features,
     )
+
+
+def _build_context_feature_payload(
+    row: dict[str, object],
+    window_id: str,
+    node_id: str,
+    node_type: str,
+    node_feature_map: dict[tuple[str, str, str], dict[str, object]],
+) -> dict[str, object]:
+    ordered_keys = [
+        "label",
+        "title",
+        "url",
+        "domain",
+        "path",
+        "path_depth",
+        "app_name",
+        "window_title",
+        "duration",
+        "scroll_intensity",
+        "scroll_depth",
+        "keystrokes",
+        "mouse_activity",
+        "revisit_count",
+        "switch_in",
+        "switch_out",
+        "idle_segments",
+    ]
+    exported = node_feature_map.get((window_id, node_id, node_type), {})
+    payload = {key: row.get(key) for key in ordered_keys}
+    payload.update({key: value for key, value in exported.items() if key in ordered_keys})
+    return payload
 
 
 def _build_app_feature_payload(
@@ -1588,7 +1515,7 @@ def _compute_positions(nodes: list[GraphNodeView], width: int, height: int) -> d
         return {}
 
     app_nodes = [node for node in nodes if node.node_kind == "app"]
-    tab_nodes = [node for node in nodes if node.node_kind == "tab"]
+    tab_nodes = [node for node in nodes if node.node_kind in {"tab", "page"}]
     positions: dict[str, tuple[float, float]] = {}
 
     if app_nodes and tab_nodes:
@@ -1642,19 +1569,15 @@ def _arc_positions(
 
 
 def _edge_color(edge_kind: str) -> str:
-    if edge_kind == "app_app":
-        return _APP_EDGE
-    if edge_kind == "tab_tab":
+    if edge_kind == "persistence":
         return _TAB_EDGE
+    if edge_kind == "transition":
+        return _APP_EDGE
     return _APP_TAB_EDGE
 
 
 def _edge_label(edge: GraphEdgeView) -> str:
-    if edge.edge_kind == "app_app":
-        return str(edge.features.get("transition_count", ""))
-    if edge.edge_kind == "tab_tab":
-        return str(edge.features.get("switch_count", ""))
-    return ""
+    return str(edge.features.get("transition_count", ""))
 
 
 def _window_footer_text(window_graph: WindowGraphView) -> str:

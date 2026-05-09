@@ -22,6 +22,7 @@ from typing import Dict, Literal, Optional
 import numpy as np
 import pandas as pd
 
+from .context_model import context_from_json_series, is_internal_app
 from .windowing import WindowEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -128,8 +129,11 @@ class FeatureExtractor:
 
             slices: Dict[str, pd.DataFrame] = {}
             for name, df in sorted_streams.items():
-                lo, hi = self._engine.window_slice_indices(ts_arrays[name], ws, we)
-                slices[name] = df.iloc[lo:hi]
+                if name == "behavior":
+                    slices[name] = self._slice_behavior_events(df, ws, we)
+                else:
+                    lo, hi = self._engine.window_slice_indices(ts_arrays[name], ws, we)
+                    slices[name] = df.iloc[lo:hi]
 
             meta = {
                 "window_id": str(win["window_id"]),
@@ -140,7 +144,7 @@ class FeatureExtractor:
 
             rows_by_modality["behavior"].append({
                 **meta,
-                **self._behavior_features(slices.get("behavior", pd.DataFrame()), size_s),
+                **self._behavior_features(slices.get("behavior", pd.DataFrame()), size_s, ws, we),
             })
             rows_by_modality["keyboard"].append({
                 **meta,
@@ -233,10 +237,33 @@ class FeatureExtractor:
         ordered = ["window_id", "session_id", "window_start", "window_end", *feature_cols]
         return result[ordered]
 
-    def _behavior_features(self, df: pd.DataFrame, size_s: float) -> dict[str, float]:
+    def _slice_behavior_events(self, df: pd.DataFrame, window_start: float, window_end: float) -> pd.DataFrame:
+        if df is None or df.empty or "timestamp" not in df.columns:
+            return pd.DataFrame(columns=df.columns if df is not None else [])
+
+        behavior = df.copy()
+        behavior["timestamp"] = pd.to_numeric(behavior["timestamp"], errors="coerce")
+        behavior = behavior.dropna(subset=["timestamp"])
+        if behavior.empty:
+            return behavior
+
+        event_type = behavior.get("event_type", pd.Series(dtype=str)).fillna("").astype(str).str.lower()
+        start_time = pd.to_numeric(behavior.get("start_time", pd.Series(dtype=float)), errors="coerce")
+        end_time = pd.to_numeric(behavior.get("end_time", pd.Series(dtype=float)), errors="coerce")
+        has_interval = event_type.eq("context_end") & start_time.notna() & end_time.notna()
+        timestamp_in_window = behavior["timestamp"].ge(window_start) & behavior["timestamp"].lt(window_end)
+        interval_overlaps = has_interval & start_time.lt(window_end) & end_time.gt(window_start)
+        return behavior[timestamp_in_window | interval_overlaps].copy()
+
+    def _behavior_features(self, df: pd.DataFrame, size_s: float, window_start: float, window_end: float) -> dict[str, float]:
         if df.empty or size_s <= 0:
             return _zero_behavior()
         size_ms = size_s * 1_000.0
+
+        if "app_name" in df.columns:
+            df = df[~df["app_name"].map(is_internal_app)].copy()
+        if df.empty:
+            return _zero_behavior()
 
         ctx = df[df["event_type"] == "context_end"].copy()
         ctx["start_time"] = pd.to_numeric(ctx.get("start_time"), errors="coerce")
@@ -246,8 +273,8 @@ class FeatureExtractor:
         if not ctx.empty:
             overlap_s = np.maximum(
                 0.0,
-                np.minimum(ctx["end_time"].values, df["timestamp"].max())
-                - np.maximum(ctx["start_time"].values, df["timestamp"].min()),
+                np.minimum(ctx["end_time"].values, window_end)
+                - np.maximum(ctx["start_time"].values, window_start),
             )
             overlap_ms = overlap_s * 1_000.0
             idle_mask = ctx["app_name"].astype(str).str.lower() == "idle"
@@ -279,6 +306,9 @@ class FeatureExtractor:
     def _keyboard_features(self, df: pd.DataFrame, size_s: float) -> dict[str, float]:
         if df.empty or size_s <= 0:
             return _zero_keyboard()
+        df = self._exclude_internal_context(df)
+        if df.empty:
+            return _zero_keyboard()
 
         presses = df[df["event_type"] == "key_press"]
         intervals = pd.to_numeric(presses.get("interval_ms", pd.Series(dtype=float)), errors="coerce").dropna()
@@ -301,6 +331,9 @@ class FeatureExtractor:
 
     def _mouse_features(self, df: pd.DataFrame, size_s: float) -> dict[str, float]:
         if df.empty or size_s <= 0:
+            return _zero_mouse()
+        df = self._exclude_internal_context(df)
+        if df.empty:
             return _zero_mouse()
 
         moves = df[df["event_type"] == "mouse_move"]
@@ -376,6 +409,17 @@ class FeatureExtractor:
             "ram_spikes": float(flag.mean()) if not flag.empty else 0.0,
             "network_load": float(net.mean()) if not net.empty else 0.0,
         }
+
+    def _exclude_internal_context(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty or "context" not in df.columns:
+            return df
+        contexts = context_from_json_series(df["context"])
+        if contexts.empty or "active_app" not in contexts.columns:
+            return df
+        internal_mask = contexts["active_app"].map(is_internal_app).fillna(False).to_numpy(dtype=bool)
+        if not internal_mask.any():
+            return df
+        return df.loc[~internal_mask].copy()
 
 
 def _zero_behavior() -> dict[str, float]:

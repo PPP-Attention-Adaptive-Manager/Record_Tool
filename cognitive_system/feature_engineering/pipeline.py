@@ -317,7 +317,11 @@ class FeaturePipeline:
 
             builder = GraphBuilder(node_level=self.config.graph_node_level)
             behavior_df = streams.get("behavior", pd.DataFrame())
-            cleaned_events, nodes_df, edges_df, temporal_edges_df = builder.build(behavior_df)
+            cleaned_events, nodes_df, edges_df, temporal_edges_df = builder.build(
+                behavior_df,
+                keyboard_df=streams.get("keyboard"),
+                mouse_df=streams.get("mouse"),
+            )
             if cleaned_events.empty:
                 LOGGER.warning("Graph: no valid behavior events found after cleaning/filtering.")
 
@@ -334,6 +338,9 @@ class FeaturePipeline:
                 window_nodes_df, window_edges_df, window_temporal_df = builder.build_windowed(
                     cleaned_events,
                     windows,
+                    behavior_df=behavior_df,
+                    keyboard_df=streams.get("keyboard"),
+                    mouse_df=streams.get("mouse"),
                 )
                 out_dir = windows_root / wc.label
                 builder.export_windowed(window_nodes_df, window_edges_df, window_temporal_df, out_dir)
