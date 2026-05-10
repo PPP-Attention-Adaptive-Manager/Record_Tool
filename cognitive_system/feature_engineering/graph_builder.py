@@ -484,7 +484,7 @@ class GraphBuilder:
         metadata["switch_in"] = metadata["node_id"].map(lambda node_id: int(switch_in.get(node_id, 0)))
         metadata["switch_out"] = metadata["node_id"].map(lambda node_id: int(switch_out.get(node_id, 0)))
 
-        scroll_features = self._build_scroll_feature_map(behavior_df, events_df)
+        scroll_features = self._build_scroll_feature_map(behavior_df, mouse_df, events_df)
         keystroke_counts = self._build_keyboard_count_map(keyboard_df, events_df)
         mouse_counts = self._build_mouse_count_map(mouse_df, events_df)
 
@@ -508,16 +508,48 @@ class GraphBuilder:
     def _build_scroll_feature_map(
         self,
         behavior_df: pd.DataFrame | None,
+        mouse_df: pd.DataFrame | None,
         events_df: pd.DataFrame,
     ) -> dict[str, dict[str, float]]:
-        if behavior_df is None or behavior_df.empty or "timestamp" not in behavior_df.columns:
+        frames: list[pd.DataFrame] = []
+
+        behavior_scrolls = self._prepare_behavior_scroll_rows(behavior_df, events_df)
+        if not behavior_scrolls.empty:
+            frames.append(behavior_scrolls)
+
+        mouse_scrolls = self._prepare_mouse_scroll_rows(mouse_df, events_df)
+        if not mouse_scrolls.empty:
+            frames.append(mouse_scrolls)
+
+        if not frames:
             return {}
+
+        scrolls = pd.concat(frames, ignore_index=True)
+        if scrolls.empty:
+            return {}
+
+        grouped = (
+            scrolls.groupby("node_id")
+            .agg(
+                scroll_total=("scroll_delta_y", lambda values: float(values.abs().sum())),
+                scroll_depth=("scroll_total_y", lambda values: float(values.abs().max()) if len(values) else 0.0),
+            )
+        )
+        return grouped.to_dict(orient="index")
+
+    def _prepare_behavior_scroll_rows(
+        self,
+        behavior_df: pd.DataFrame | None,
+        events_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        if behavior_df is None or behavior_df.empty or "timestamp" not in behavior_df.columns:
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
 
         scrolls = behavior_df.copy()
         scrolls["event_type"] = scrolls.get("event_type", pd.Series(dtype=str)).fillna("").astype(str)
         scrolls = scrolls[scrolls["event_type"].str.contains("scroll", case=False, na=False)].copy()
         if scrolls.empty:
-            return {}
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
 
         scrolls["timestamp"] = pd.to_numeric(scrolls["timestamp"], errors="coerce")
         scrolls = scrolls.dropna(subset=["timestamp"]).copy()
@@ -525,12 +557,12 @@ class GraphBuilder:
             scrolls["app_name"] = ""
         scrolls = scrolls[~_internal_context_mask(scrolls)].copy()
         if scrolls.empty:
-            return {}
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
 
         scrolls["node_id"] = self._resolve_row_nodes_with_interval_fallback(scrolls, events_df)
         scrolls = scrolls[scrolls["node_id"].astype(str).str.len().gt(0)].copy()
         if scrolls.empty:
-            return {}
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
 
         scrolls["scroll_delta_y"] = pd.to_numeric(
             scrolls.get("scroll_delta_y", pd.Series(dtype=float)),
@@ -540,14 +572,36 @@ class GraphBuilder:
             scrolls.get("scroll_total_y", pd.Series(dtype=float)),
             errors="coerce",
         ).fillna(0.0)
-        grouped = (
-            scrolls.groupby("node_id")
-            .agg(
-                scroll_total=("scroll_delta_y", lambda values: float(values.abs().sum())),
-                scroll_depth=("scroll_total_y", lambda values: float(values.abs().max()) if len(values) else 0.0),
-            )
-        )
-        return grouped.to_dict(orient="index")
+        return scrolls[["node_id", "scroll_delta_y", "scroll_total_y"]]
+
+    def _prepare_mouse_scroll_rows(
+        self,
+        mouse_df: pd.DataFrame | None,
+        events_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        if mouse_df is None or mouse_df.empty or "timestamp" not in mouse_df.columns:
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
+
+        scrolls = mouse_df.copy()
+        scrolls["timestamp"] = pd.to_numeric(scrolls["timestamp"], errors="coerce")
+        scrolls = scrolls.dropna(subset=["timestamp"]).copy()
+        if scrolls.empty or "event_type" not in scrolls.columns:
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
+
+        scrolls = scrolls[scrolls["event_type"].fillna("").astype(str).str.lower().eq("mouse_scroll")].copy()
+        if scrolls.empty:
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
+
+        scrolls["node_id"] = self._resolve_context_json_nodes_with_interval_fallback(scrolls, events_df)
+        scrolls = scrolls[scrolls["node_id"].astype(str).str.len().gt(0)].copy()
+        if scrolls.empty:
+            return pd.DataFrame(columns=["node_id", "scroll_delta_y", "scroll_total_y"])
+
+        dy = pd.to_numeric(scrolls.get("delta_y", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+        dx = pd.to_numeric(scrolls.get("delta_x", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+        scrolls["scroll_delta_y"] = dy.where(dy.abs().ge(dx.abs()), dx)
+        scrolls["scroll_total_y"] = scrolls.groupby("node_id")["scroll_delta_y"].cumsum().abs()
+        return scrolls[["node_id", "scroll_delta_y", "scroll_total_y"]]
 
     def _build_keyboard_count_map(
         self,

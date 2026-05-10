@@ -144,7 +144,13 @@ class FeatureExtractor:
 
             rows_by_modality["behavior"].append({
                 **meta,
-                **self._behavior_features(slices.get("behavior", pd.DataFrame()), size_s, ws, we),
+                **self._behavior_features(
+                    slices.get("behavior", pd.DataFrame()),
+                    size_s,
+                    ws,
+                    we,
+                    slices.get("mouse", pd.DataFrame()),
+                ),
             })
             rows_by_modality["keyboard"].append({
                 **meta,
@@ -255,15 +261,26 @@ class FeatureExtractor:
         interval_overlaps = has_interval & start_time.lt(window_end) & end_time.gt(window_start)
         return behavior[timestamp_in_window | interval_overlaps].copy()
 
-    def _behavior_features(self, df: pd.DataFrame, size_s: float, window_start: float, window_end: float) -> dict[str, float]:
+    def _behavior_features(
+        self,
+        df: pd.DataFrame,
+        size_s: float,
+        window_start: float,
+        window_end: float,
+        mouse_df: pd.DataFrame | None = None,
+    ) -> dict[str, float]:
         if df.empty or size_s <= 0:
-            return _zero_behavior()
+            features = _zero_behavior()
+            features["scroll_intensity"] = self._mouse_scroll_intensity(mouse_df, size_s)
+            return features
         size_ms = size_s * 1_000.0
 
         if "app_name" in df.columns:
             df = df[~self._internal_behavior_mask(df)].copy()
         if df.empty:
-            return _zero_behavior()
+            features = _zero_behavior()
+            features["scroll_intensity"] = self._mouse_scroll_intensity(mouse_df, size_s)
+            return features
 
         ctx = df[df["event_type"] == "context_end"].copy()
         ctx["start_time"] = pd.to_numeric(ctx.get("start_time"), errors="coerce")
@@ -294,6 +311,8 @@ class FeatureExtractor:
         scrolls = df[df["event_type"].astype(str).str.contains("scroll", case=False, na=False)]
         scroll_delta = pd.to_numeric(scrolls.get("scroll_delta_y", pd.Series(dtype=float)), errors="coerce")
         scroll_intensity = float(scroll_delta.abs().sum()) / size_s
+        if scroll_intensity == 0.0:
+            scroll_intensity = self._mouse_scroll_intensity(mouse_df, size_s)
 
         return {
             "switch_rate": switch_rate,
@@ -442,6 +461,19 @@ class FeatureExtractor:
             index=df.index,
             dtype=bool,
         )
+
+    def _mouse_scroll_intensity(self, df: pd.DataFrame | None, size_s: float) -> float:
+        if df is None or df.empty or size_s <= 0:
+            return 0.0
+        mouse = self._exclude_internal_context(df)
+        if mouse.empty or "event_type" not in mouse.columns:
+            return 0.0
+        scrolls = mouse[mouse["event_type"].fillna("").astype(str).str.lower().eq("mouse_scroll")]
+        if scrolls.empty:
+            return 0.0
+        dy = pd.to_numeric(scrolls.get("delta_y", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+        dx = pd.to_numeric(scrolls.get("delta_x", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+        return float(dy.abs().sum() + dx.abs().sum()) / size_s
 
 
 def _zero_behavior() -> dict[str, float]:
