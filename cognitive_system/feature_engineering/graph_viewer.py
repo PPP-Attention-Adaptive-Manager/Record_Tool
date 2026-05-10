@@ -426,7 +426,8 @@ class SessionWindowGraphViewer:
             fg=_TEXT,
             font=("Segoe UI", 11, "bold"),
             justify="left",
-        ).pack(anchor="w", pady=(10, 4))
+            wraplength=340,
+        ).pack(anchor="w", fill="x", pady=(10, 4))
 
         tk.Label(
             parent,
@@ -700,6 +701,7 @@ class SessionWindowGraphViewer:
         edge_hits: list[dict[str, object]] = []
         node_hits: list[dict[str, object]] = []
         _draw_edge_legend(canvas, width)
+        edge_offsets = _edge_parallel_offsets(window_graph.edges)
 
         for edge in window_graph.edges:
             x1, y1 = positions[edge.source_key]
@@ -734,11 +736,10 @@ class SessionWindowGraphViewer:
                     }
                 )
             else:
+                offset = float(edge_offsets.get(edge.edge_id, 0.0))
+                draw_points, label_x, label_y = _offset_edge_points(x1, y1, x2, y2, offset)
                 item_id = canvas.create_line(
-                    x1,
-                    y1,
-                    x2,
-                    y2,
+                    *draw_points,
                     fill=line_color,
                     width=line_width,
                     arrow=tk.LAST,
@@ -749,26 +750,25 @@ class SessionWindowGraphViewer:
                     {
                         "edge": edge,
                         "segment": (x1, y1, x2, y2),
+                        "curve_points": draw_points,
                         "self_loop": False,
                         "items": [item_id],
                         "stroke_items": [item_id],
                         "style": style,
                     }
                 )
-                mx = (x1 + x2) / 2
-                my = (y1 + y2) / 2
                 label = _edge_label(edge)
                 if label:
                     label_width = max(24, min(52, 10 + 7 * len(label)))
                     rect_id = canvas.create_rectangle(
-                        mx - label_width / 2,
-                        my - 9,
-                        mx + label_width / 2,
-                        my + 9,
+                        label_x - label_width / 2,
+                        label_y - 9,
+                        label_x + label_width / 2,
+                        label_y + 9,
                         fill="#ffffff",
                         outline="",
                     )
-                    text_id = canvas.create_text(mx, my, text=label, fill=line_color, font=("Segoe UI", 8, "bold"))
+                    text_id = canvas.create_text(label_x, label_y, text=label, fill=line_color, font=("Segoe UI", 8, "bold"))
                     edge_hits[-1]["items"].extend([rect_id, text_id])
 
         for node in window_graph.nodes:
@@ -843,19 +843,13 @@ class SessionWindowGraphViewer:
                 self._show_node_details(window_graph, node_map[node_key])
                 return
 
-        for edge_hit in state["edge_hits"]:
+        edge_hit_result = self._hit_test_edge(state, x, y)
+        if edge_hit_result is not None:
+            edge_hit = edge_hit_result["edge_hit"]
             edge = edge_hit["edge"]
-            if edge_hit["self_loop"]:
-                x1, y1, x2, y2 = edge_hit["bbox"]
-                if x1 <= x <= x2 and y1 <= y <= y2:
-                    self._select_edge(canvas, state, edge_hit)
-                    self._show_edge_details(window_graph, edge)
-                    return
-            else:
-                if _distance_to_segment(x, y, *edge_hit["segment"]) <= 10.0:
-                    self._select_edge(canvas, state, edge_hit)
-                    self._show_edge_details(window_graph, edge)
-                    return
+            self._select_edge(canvas, state, edge_hit)
+            self._show_edge_details(window_graph, edge)
+            return
 
         self._clear_selection(canvas, state)
         self._show_window_details(window_graph)
@@ -897,14 +891,28 @@ class SessionWindowGraphViewer:
                 if x1 <= x <= x2 and y1 <= y <= y2:
                     return {"kind": "node", "node_hit": node_hit}
 
+        return self._hit_test_edge(state, x, y)
+
+    def _hit_test_edge(self, state: dict[str, object], x: float, y: float) -> dict[str, object] | None:
+        best_hit: dict[str, object] | None = None
+        best_distance = 13.0
         for edge_hit in state.get("edge_hits", []):
             if edge_hit["self_loop"]:
                 x1, y1, x2, y2 = edge_hit["bbox"]
                 if x1 <= x <= x2 and y1 <= y <= y2:
                     return {"kind": "edge", "edge_hit": edge_hit}
-            elif _distance_to_segment(x, y, *edge_hit["segment"]) <= 10.0:
-                return {"kind": "edge", "edge_hit": edge_hit}
-        return None
+                continue
+
+            points = edge_hit.get("curve_points")
+            distance = (
+                _distance_to_polyline(x, y, points)
+                if isinstance(points, (list, tuple))
+                else _distance_to_segment(x, y, *edge_hit["segment"])
+            )
+            if distance <= best_distance:
+                best_distance = distance
+                best_hit = edge_hit
+        return {"kind": "edge", "edge_hit": best_hit} if best_hit is not None else None
 
     def _clear_hover(self, canvas, state: dict[str, object]) -> None:
         hit = state.pop("hover_hit", None)
@@ -965,15 +973,30 @@ class SessionWindowGraphViewer:
             f"{edge.source_label} -> {edge.target_label}"
         )
         style = _edge_style(edge, window_graph.duration_seconds)
-        features = dict(edge.features)
-        features.update(
-            {
-                "duration_band": style.get("duration_band"),
-                "visual_color": style.get("color"),
-                "visual_reason": style.get("style_reason"),
-            }
-        )
-        self._show_info(f"Edge: {edge.source_label} -> {edge.target_label}", meta, features)
+        raw_features = dict(edge.features)
+        features = {
+            "window_id": window_graph.window_id,
+            "source_id": edge.source_key,
+            "target_id": edge.target_key,
+            "source_label": edge.source_label,
+            "target_label": edge.target_label,
+        }
+        for key in (
+            "copy_count",
+            "cut_count",
+            "paste_count",
+            "copy_paste_count",
+            "copy_paste_latency_mean_ms",
+        ):
+            if key in raw_features:
+                features[key] = raw_features.get(key)
+        for key, value in raw_features.items():
+            if key not in features:
+                features[key] = value
+        features["duration_band"] = style.get("duration_band")
+        features["visual_color"] = style.get("color")
+        features["visual_reason"] = style.get("style_reason")
+        self._show_info(f"Edge {window_graph.window_id}: {edge.source_label} -> {edge.target_label}", meta, features)
 
     def _show_info(self, title: str, meta: str, features: dict[str, object]) -> None:
         self.selection_title_var.set(title)
@@ -1059,17 +1082,20 @@ class SessionWindowGraphViewer:
             node_tree.insert("", "end", values=(node.node_kind, node.label))
 
         tk.Label(edge_frame, text="Edges", bg="#eef4fb", fg=_TEXT, font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        edge_tree = ttk.Treeview(edge_frame, columns=("kind", "source", "target"), show="headings", height=16)
+        edge_tree = ttk.Treeview(edge_frame, columns=("kind", "source", "target", "clip"), show="headings", height=16)
         edge_tree.heading("kind", text="kind")
         edge_tree.heading("source", text="source")
         edge_tree.heading("target", text="target")
+        edge_tree.heading("clip", text="clip")
         edge_tree.column("kind", width=90, anchor="center")
         edge_tree.column("source", width=220, anchor="w")
         edge_tree.column("target", width=220, anchor="w")
+        edge_tree.column("clip", width=70, anchor="center")
         edge_tree.pack(fill="both", expand=True, pady=(6, 0))
 
         for edge in window_graph.edges:
-            edge_tree.insert("", "end", values=(edge.edge_kind, edge.source_label, edge.target_label))
+            clip = _edge_clipboard_activity(edge)
+            edge_tree.insert("", "end", values=(edge.edge_kind, edge.source_label, edge.target_label, _format_value(clip)))
 
     def _redraw_detail_graph(self, canvas, window_graph: WindowGraphView, width: int, height: int) -> None:
         if width < 260 or height < 160:
@@ -1968,6 +1994,52 @@ def _draw_system_pattern_chart(
             canvas.create_oval(points[0] - 3, points[1] - 3, points[0] + 3, points[1] + 3, fill=color, outline="")
 
 
+def _edge_parallel_offsets(edges: list[GraphEdgeView]) -> dict[str, float]:
+    groups: dict[tuple[str, str], list[GraphEdgeView]] = {}
+    for edge in edges:
+        if edge.source_key == edge.target_key:
+            continue
+        pair = tuple(sorted((edge.source_key, edge.target_key)))
+        groups.setdefault(pair, []).append(edge)
+
+    offsets: dict[str, float] = {}
+    for group in groups.values():
+        ordered = sorted(
+            group,
+            key=lambda edge: (
+                edge.source_key,
+                edge.target_key,
+                -_edge_clipboard_activity(edge),
+                edge.edge_kind,
+                edge.edge_id,
+            ),
+        )
+        if len(ordered) == 1:
+            offsets[ordered[0].edge_id] = 0.0
+            continue
+        center = (len(ordered) - 1) / 2.0
+        for index, edge in enumerate(ordered):
+            offsets[edge.edge_id] = (index - center) * 22.0
+    return offsets
+
+
+def _offset_edge_points(x1: float, y1: float, x2: float, y2: float, offset: float) -> tuple[list[float], float, float]:
+    if abs(offset) < 0.01:
+        return [x1, y1, x2, y2], (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return [x1, y1, x2, y2], x1, y1
+
+    normal_x = -dy / length
+    normal_y = dx / length
+    control_x = (x1 + x2) / 2.0 + normal_x * offset
+    control_y = (y1 + y2) / 2.0 + normal_y * offset
+    return [x1, y1, control_x, control_y, x2, y2], control_x, control_y
+
+
 def _edge_style(edge: GraphEdgeView, window_duration_seconds: float) -> dict[str, object]:
     edge_type = str(edge.features.get("edge_type") or edge.edge_kind)
     count = max(1.0, _feature_float(edge.features.get("transition_count"), 1.0))
@@ -2036,11 +2108,7 @@ def _edge_label(edge: GraphEdgeView) -> str:
     clipboard_count = _feature_float(edge.features.get("copy_paste_count"), 0.0)
     if clipboard_count > 0:
         return f"cp:{int(clipboard_count)}"
-    clipboard_activity = (
-        _feature_float(edge.features.get("copy_count"), 0.0)
-        + _feature_float(edge.features.get("cut_count"), 0.0)
-        + _feature_float(edge.features.get("paste_count"), 0.0)
-    )
+    clipboard_activity = _edge_clipboard_activity(edge)
     if clipboard_activity > 0:
         return f"clip:{int(clipboard_activity)}"
     count = _feature_float(edge.features.get("transition_count"), 0.0)
@@ -2050,6 +2118,15 @@ def _edge_label(edge: GraphEdgeView) -> str:
     if avg_ms > 0:
         return f"{int(count)}|{avg_ms / 1000.0:.1f}s"
     return str(int(count))
+
+
+def _edge_clipboard_activity(edge: GraphEdgeView) -> float:
+    return (
+        _feature_float(edge.features.get("copy_paste_count"), 0.0)
+        + _feature_float(edge.features.get("copy_count"), 0.0)
+        + _feature_float(edge.features.get("cut_count"), 0.0)
+        + _feature_float(edge.features.get("paste_count"), 0.0)
+    )
 
 
 def _configure_edge_hit(canvas, edge_hit: dict[str, object], highlighted: bool, selected: bool = False) -> None:
@@ -2118,6 +2195,15 @@ def _window_footer_text(window_graph: WindowGraphView) -> str:
         summary.append(f"switch_rate={_format_value(window_graph.window_features.get('switch_rate'))}")
     if "focus_duration_ratio" in window_graph.window_features:
         summary.append(f"focus_ratio={_format_value(window_graph.window_features.get('focus_duration_ratio'))}")
+    clipboard_total = sum(
+        _feature_float(edge.features.get("copy_paste_count"), 0.0)
+        + _feature_float(edge.features.get("copy_count"), 0.0)
+        + _feature_float(edge.features.get("cut_count"), 0.0)
+        + _feature_float(edge.features.get("paste_count"), 0.0)
+        for edge in window_graph.edges
+    )
+    if clipboard_total > 0:
+        summary.append(f"clip={_format_value(clipboard_total)}")
     return "   ".join(summary) if summary else f"duration={window_graph.duration_seconds:.2f}s"
 
 
@@ -2263,6 +2349,24 @@ def _distance_to_segment(px: float, py: float, x1: float, y1: float, x2: float, 
     proj_x = x1 + t * dx
     proj_y = y1 + t * dy
     return math.hypot(px - proj_x, py - proj_y)
+
+
+def _distance_to_polyline(px: float, py: float, points: list[float] | tuple[float, ...]) -> float:
+    if len(points) < 4:
+        return float("inf")
+    distances = []
+    for index in range(0, len(points) - 2, 2):
+        distances.append(
+            _distance_to_segment(
+                px,
+                py,
+                float(points[index]),
+                float(points[index + 1]),
+                float(points[index + 2]),
+                float(points[index + 3]),
+            )
+        )
+    return min(distances) if distances else float("inf")
 
 
 def _truncate(text: str, limit: int) -> str:
