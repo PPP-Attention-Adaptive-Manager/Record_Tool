@@ -297,6 +297,9 @@ class SessionWindowGraphViewer:
 
         self._bundle: Optional[SessionWindowBundle] = None
         self._canvas_registry: dict[object, dict[str, object]] = {}
+        self._viewport_width = 0
+        self._resize_after_id: object | None = None
+        self._rendering_windows = False
 
         self._build_layout()
         self.root.after(50, self.refresh)
@@ -386,8 +389,8 @@ class SessionWindowGraphViewer:
 
         left = tk.Frame(body, bg="#eaf1f9")
         right = tk.Frame(body, bg=_PANEL_BG, padx=12, pady=12)
-        body.add(left, stretch="always", minsize=860)
-        body.add(right, minsize=360)
+        body.add(left, stretch="always", minsize=460)
+        body.add(right, minsize=320)
 
         self.canvas = tk.Canvas(left, bg="#eaf1f9", highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -459,7 +462,25 @@ class SessionWindowGraphViewer:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _on_canvas_configure(self, event) -> None:
+        previous_width = self._viewport_width
+        self._viewport_width = int(event.width)
         self.canvas.itemconfigure(self.grid_window, width=event.width)
+        if self._rendering_windows or self._bundle is None or self._bundle.error:
+            return
+        if abs(self._viewport_width - previous_width) >= 48:
+            self._schedule_layout_refresh()
+
+    def _schedule_layout_refresh(self) -> None:
+        if self._resize_after_id is not None:
+            try:
+                self.root.after_cancel(self._resize_after_id)
+            except Exception:
+                pass
+        self._resize_after_id = self.root.after(220, self._refresh_layout_after_resize)
+
+    def _refresh_layout_after_resize(self) -> None:
+        self._resize_after_id = None
+        self.render_windows()
 
     def _on_mousewheel(self, event) -> None:
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -505,47 +526,71 @@ class SessionWindowGraphViewer:
 
     def render_windows(self) -> None:
         tk = self.tk
-        for child in self.grid_frame.winfo_children():
-            child.destroy()
-        self._canvas_registry.clear()
+        self._rendering_windows = True
+        try:
+            for child in self.grid_frame.winfo_children():
+                child.destroy()
+            self._canvas_registry.clear()
 
-        if self._bundle is None:
-            return
+            if self._bundle is None:
+                return
 
-        if self._bundle.error:
-            error_label = tk.Label(
-                self.grid_frame,
-                text=self._bundle.error,
-                bg="#eaf1f9",
-                fg="#af4343",
-                font=("Segoe UI", 12),
-                padx=18,
-                pady=30,
-            )
-            error_label.grid(row=0, column=0, sticky="w")
-            self._show_info("Selection", self._bundle.error, {})
+            if self._bundle.error:
+                error_label = tk.Label(
+                    self.grid_frame,
+                    text=self._bundle.error,
+                    bg="#eaf1f9",
+                    fg="#af4343",
+                    font=("Segoe UI", 12),
+                    padx=18,
+                    pady=30,
+                )
+                error_label.grid(row=0, column=0, sticky="w")
+                self._show_info("Selection", self._bundle.error, {})
+                self._on_frame_configure()
+                return
+
+            columns, graph_width, graph_height = self._window_grid_metrics()
+            max_configured_columns = max(5, int(self.columns_var.get()), columns)
+            for col in range(max_configured_columns):
+                self.grid_frame.grid_columnconfigure(col, weight=0, uniform="")
+            for col in range(columns):
+                self.grid_frame.grid_columnconfigure(col, weight=1, uniform="window_cols")
+
+            for index, window_graph in enumerate(self._bundle.windows):
+                row = index // columns
+                col = index % columns
+                card = self._build_window_card(self.grid_frame, window_graph, graph_width, graph_height)
+                card.grid(row=row, column=col, sticky="nsew", padx=8, pady=8)
+
+            if self._bundle.windows:
+                first = self._bundle.windows[0]
+                if first.nodes:
+                    self._show_node_details(first, first.nodes[0])
+                else:
+                    self._show_window_details(first)
             self._on_frame_configure()
-            return
+        finally:
+            self._rendering_windows = False
 
-        columns = max(1, int(self.columns_var.get()))
-        for col in range(columns):
-            self.grid_frame.grid_columnconfigure(col, weight=1, uniform="window_cols")
+    def _window_grid_metrics(self) -> tuple[int, int, int]:
+        requested_columns = max(1, int(self.columns_var.get()))
+        viewport_width = self._viewport_width or self.canvas.winfo_width()
+        if viewport_width <= 1:
+            viewport_width = (self.card_width + 24) * requested_columns
 
-        for index, window_graph in enumerate(self._bundle.windows):
-            row = index // columns
-            col = index % columns
-            card = self._build_window_card(self.grid_frame, window_graph)
-            card.grid(row=row, column=col, sticky="nsew", padx=8, pady=8)
+        min_outer_width = 310
+        usable_width = max(260, int(viewport_width) - 8)
+        max_columns_for_width = max(1, usable_width // min_outer_width)
+        columns = max(1, min(requested_columns, max_columns_for_width))
 
-        if self._bundle.windows:
-            first = self._bundle.windows[0]
-            if first.nodes:
-                self._show_node_details(first, first.nodes[0])
-            else:
-                self._show_window_details(first)
-        self._on_frame_configure()
+        horizontal_padding = 16 * columns
+        outer_width = max(min_outer_width, int((usable_width - horizontal_padding) / columns))
+        graph_width = max(240, outer_width - 22)
+        graph_height = max(170, min(240, int(graph_width * 0.58)))
+        return columns, graph_width, graph_height
 
-    def _build_window_card(self, parent, window_graph: WindowGraphView):
+    def _build_window_card(self, parent, window_graph: WindowGraphView, graph_width: int, graph_height: int):
         tk = self.tk
         ttk = self.ttk
 
@@ -584,13 +629,13 @@ class SessionWindowGraphViewer:
 
         canvas = tk.Canvas(
             card,
-            width=self.card_width,
-            height=self.card_height,
+            width=graph_width,
+            height=graph_height,
             bg=_CANVAS_BG,
             highlightthickness=0,
         )
-        canvas.pack(fill="both", expand=False)
-        draw_state = self._draw_window_graph(canvas, window_graph, self.card_width, self.card_height)
+        canvas.pack(fill="x", expand=False)
+        draw_state = self._draw_window_graph(canvas, window_graph, graph_width, graph_height)
         self._canvas_registry[canvas] = draw_state
         canvas.bind("<Button-1>", lambda event, c=canvas: self._on_canvas_click(event, c))
         canvas.bind("<Motion>", lambda event, c=canvas: self._on_canvas_motion(event, c))
@@ -598,6 +643,7 @@ class SessionWindowGraphViewer:
 
         footer = tk.Frame(card, bg=_CARD_BG)
         footer.pack(fill="x", pady=(8, 0))
+        footer.grid_columnconfigure(0, weight=1, minsize=80)
 
         tk.Label(
             footer,
@@ -607,19 +653,24 @@ class SessionWindowGraphViewer:
             justify="left",
             anchor="w",
             font=("Segoe UI", 9),
-        ).pack(side="left", fill="x", expand=True)
+            wraplength=max(90, graph_width - 165),
+        ).grid(row=0, column=0, sticky="ew")
 
+        button_bar = tk.Frame(footer, bg=_CARD_BG)
+        button_bar.grid(row=0, column=1, sticky="e", padx=(8, 0))
         ttk.Button(
-            footer,
-            text="Window Details",
+            button_bar,
+            text="Details",
+            width=8,
             command=lambda wg=window_graph: self._open_window_details(wg),
-        ).pack(side="right")
+        ).pack(side="left")
 
         ttk.Button(
-            footer,
-            text="System Pattern",
+            button_bar,
+            text="Metrics",
+            width=8,
             command=lambda wg=window_graph: self._open_system_pattern(wg),
-        ).pack(side="right", padx=(0, 6))
+        ).pack(side="left", padx=(6, 0))
 
         return card
 
@@ -635,7 +686,14 @@ class SessionWindowGraphViewer:
                 fill=_MUTED,
                 font=("Segoe UI", 10),
             )
-            return {"window_graph": window_graph, "node_positions": {}, "node_radius": 18, "edge_hits": []}
+            return {
+                "window_graph": window_graph,
+                "node_positions": {},
+                "node_radius": 18,
+                "edge_hits": [],
+                "node_hits": [],
+                "node_map": {},
+            }
 
         positions = _compute_positions(window_graph.nodes, width, height)
         node_radius = 18
@@ -972,6 +1030,10 @@ class SessionWindowGraphViewer:
         graph_canvas.bind("<Button-1>", lambda event, c=graph_canvas: self._on_canvas_click(event, c))
         graph_canvas.bind("<Motion>", lambda event, c=graph_canvas: self._on_canvas_motion(event, c))
         graph_canvas.bind("<Leave>", lambda _event, c=graph_canvas: self._on_canvas_leave(c))
+        graph_canvas.bind(
+            "<Configure>",
+            lambda event, c=graph_canvas, wg=window_graph: self._redraw_detail_graph(c, wg, event.width, event.height),
+        )
 
         tables = tk.Frame(win, bg="#eef4fb", padx=14, pady=14)
         tables.pack(fill="both", expand=True)
@@ -1008,6 +1070,12 @@ class SessionWindowGraphViewer:
 
         for edge in window_graph.edges:
             edge_tree.insert("", "end", values=(edge.edge_kind, edge.source_label, edge.target_label))
+
+    def _redraw_detail_graph(self, canvas, window_graph: WindowGraphView, width: int, height: int) -> None:
+        if width < 260 or height < 160:
+            return
+        state = self._draw_window_graph(canvas, window_graph, int(width), int(height))
+        self._canvas_registry[canvas] = state
 
     def _open_system_pattern(self, window_graph: WindowGraphView) -> None:
         tk = self.tk
@@ -1049,7 +1117,7 @@ class SessionWindowGraphViewer:
             highlightbackground=_CARD_BORDER,
             highlightthickness=1,
         )
-        chart.pack(fill="x", padx=14, pady=(0, 12))
+        chart.pack(fill="both", expand=True, padx=14, pady=(0, 12))
         _draw_system_pattern_chart(
             chart,
             metrics,
@@ -1058,9 +1126,20 @@ class SessionWindowGraphViewer:
             width=930,
             height=390,
         )
+        chart.bind(
+            "<Configure>",
+            lambda event, c=chart, m=metrics: _draw_system_pattern_chart(
+                c,
+                m,
+                window_graph.window_start,
+                window_graph.window_end,
+                width=max(320, int(event.width)),
+                height=max(220, int(event.height)),
+            ),
+        )
 
         summary_frame = tk.Frame(win, bg="#eef4fb", padx=14, pady=10)
-        summary_frame.pack(fill="both", expand=True)
+        summary_frame.pack(fill="x")
         tk.Label(
             summary_frame,
             text="Summary",
