@@ -152,10 +152,24 @@ class RuntimeConfig:
     app_poll_interval_seconds: float = 0.5
     browser_processes: tuple[str, ...] = (
         "chrome.exe",
+        "chrome",
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
         "msedge.exe",
+        "msedge",
+        "microsoft-edge",
+        "microsoft-edge-stable",
         "firefox.exe",
+        "firefox",
         "brave.exe",
+        "brave",
+        "brave-browser",
         "opera.exe",
+        "opera",
+        "vivaldi",
+        "vivaldi-bin",
     )
 
     device_id: str = field(

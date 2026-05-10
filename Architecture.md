@@ -123,7 +123,7 @@ The system agent is the runtime orchestrator.
 It is responsible for:
 
 - starting and ending sessions
-- tracking the foreground app on Windows
+- tracking the foreground app on Windows and Linux when desktop metadata is available
 - maintaining the active context state machine
 - finalizing context intervals into `behavior.csv`
 - writing all raw CSV streams

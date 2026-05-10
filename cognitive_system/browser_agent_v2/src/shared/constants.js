@@ -30,6 +30,8 @@ export const EVENT_TYPE = Object.freeze({
   IDLE: "idle",
   ACTIVE: "active",
   DUAL_TASK: "dual_task",
+  BROWSER_FOCUS: "browser_focus",
+  BROWSER_BLUR: "browser_blur",
 });
 
 export const CFG = Object.freeze({

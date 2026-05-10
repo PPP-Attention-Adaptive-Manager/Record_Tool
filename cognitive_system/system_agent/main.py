@@ -57,6 +57,8 @@ _CTX_SWITCH_TYPES = frozenset({"navigation", "tab_switch", "new_tab"})
 _CTX_CLOSE_TYPES = frozenset({"tab_close"})
 _CTX_IDLE_TYPE = "idle"
 _CTX_ACTIVE_TYPE = "active"
+_CTX_BROWSER_FOCUS_TYPE = "browser_focus"
+_CTX_BROWSER_BLUR_TYPE = "browser_blur"
 
 
 class CognitiveSystemAgent:
@@ -152,6 +154,14 @@ class CognitiveSystemAgent:
 
             ts = float(event["timestamp"])
             etype = event.get("event_type", "")
+
+            if etype == _CTX_BROWSER_FOCUS_TYPE:
+                await self._apply_browser_extension_focus(event, is_foreground=True)
+                continue
+
+            if etype == _CTX_BROWSER_BLUR_TYPE:
+                await self._apply_browser_extension_focus(event, is_foreground=False)
+                continue
 
             # ── Context switch events ─────────────────────────────────────────
             # These close the previous context and open a new one.
@@ -339,6 +349,59 @@ class CognitiveSystemAgent:
         self.loop.call_soon_threadsafe(
             lambda: asyncio.create_task(self._apply_browser_foreground(snapshot))
         )
+
+    async def _apply_browser_extension_focus(self, event: dict, *, is_foreground: bool) -> None:
+        """Use browser-extension focus signals as a cross-platform foreground source."""
+        if not self.session_manager.active:
+            return
+
+        self._browser_foreground = is_foreground
+        session_id = self.session_manager.session_id
+        command = self.session_manager.set_browser_foreground(is_foreground)
+        ts = float(event.get("timestamp") or time.time())
+
+        if is_foreground and session_id:
+            current_snap = self._latest_app_snapshot
+            app_name = (
+                current_snap.app_name
+                if current_snap and current_snap.is_browser
+                else "browser"
+            )
+            title = str(event.get("title") or "")
+            url = str(event.get("url") or "")
+            tab_id = str(event.get("tab_id") or "")
+            current_context = self._context_tracker.get_current_context()
+            if (
+                current_context.get("active_app") != app_name
+                or current_context.get("url") != (url or None)
+                or current_context.get("tab_id") != (tab_id or None)
+            ):
+                self._context_tracker.switch_context(ContextFrame(
+                    session_id=session_id,
+                    device_id=self.config.device_id,
+                    app_name=app_name,
+                    window_title=title,
+                    url=url,
+                    tab_id=tab_id,
+                    start_time=ts,
+                ))
+        elif not is_foreground:
+            current_context = self._context_tracker.get_current_context()
+            active_app = str(current_context.get("active_app") or "").lower()
+            if (
+                current_context.get("active_app") == "browser"
+                or current_context.get("url")
+                or current_context.get("tab_id")
+                or any(
+                    token in active_app
+                    for token in ("chrome", "chromium", "firefox", "edge", "brave", "opera", "vivaldi")
+                )
+            ):
+                self._context_tracker.close_context(ts)
+
+        if command:
+            await self._send_recording_command(command)
+        await self._broadcast_status()
 
     async def _apply_browser_foreground(self, snapshot: AppSnapshot) -> None:
         if not self.session_manager.active:

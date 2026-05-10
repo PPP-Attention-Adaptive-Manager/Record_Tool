@@ -10,6 +10,8 @@ This guide covers three workflows:
 
 From `cognitive_system/`:
 
+Windows:
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -17,10 +19,21 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
 Notes:
 
 - `requirements.txt` is the recommended install target because it includes both runtime and feature-engineering dependencies
 - `python setup.py` is still usable, but it installs only the `system_agent` dependency file
+- Linux desktops also need `python3-tk`; install `x11-utils`/`xdotool` for foreground app names and `dbus-monitor` for notification capture
+- on Wayland, browser foreground pause/resume is handled by the extension, but non-browser foreground app names may remain `unknown`
 
 ## 2. Configure Shared Runtime Settings
 
@@ -54,8 +67,16 @@ If you enable Influx export, keep `INFLUXDB_TOKEN` in your environment.
 
 From `cognitive_system/`:
 
+Windows:
+
 ```powershell
 .\.venv\Scripts\python -m system_agent
+```
+
+Linux:
+
+```bash
+./.venv/bin/python -m system_agent
 ```
 
 This is the recommended entry point for other users because it opens the desktop launcher.
@@ -78,22 +99,30 @@ During an experimental session, `Ctrl+C` opens the questionnaire immediately eve
 
 CLI fallback:
 
+Windows:
+
 ```powershell
 .\.venv\Scripts\python system_agent\main.py
+```
+
+Linux:
+
+```bash
+./.venv/bin/python system_agent/main.py
 ```
 
 You can also run it non-interactively with CLI flags defined in `system_agent/config.py`.
 
 ## 4. Load The Chrome Extension
 
-In Chrome:
+In Chrome or Chromium:
 
 1. Open `chrome://extensions`
 2. Enable Developer mode
 3. Click Load unpacked
 4. Select `cognitive_system/browser_agent_v2`
 
-In Edge, use the same steps from `edge://extensions`.
+In Edge, Brave, Opera, or Vivaldi, use the same unpacked-extension flow from that browser's extensions page.
 
 What happens at runtime:
 
@@ -130,8 +159,16 @@ Typical files:
 
 After a session finishes:
 
+Windows:
+
 ```powershell
 .\.venv\Scripts\python -m feature_engineering.pipeline <session_id> --graph-node-level app
+```
+
+Linux:
+
+```bash
+./.venv/bin/python -m feature_engineering.pipeline <session_id> --graph-node-level app
 ```
 
 Useful options:
@@ -171,15 +208,23 @@ data/<session_id>/graph/windows/120s/
 
 Important validation rule:
 
-- graph edges must be state-to-state transitions such as `code.exe -> chrome.exe`
+- graph edges must be state-to-state transitions such as `code/code.exe -> chrome/google-chrome`
 - graph edges must not be `w000001 -> w000002`
 
 ## 8. Open The Window Graph Viewer
 
 To inspect one session as a table of windows:
 
+Windows:
+
 ```powershell
 .\.venv\Scripts\python -m feature_engineering.graph_viewer --session-id <session_id> --window-label 30s
+```
+
+Linux:
+
+```bash
+./.venv/bin/python -m feature_engineering.graph_viewer --session-id <session_id> --window-label 30s
 ```
 
 Useful options:

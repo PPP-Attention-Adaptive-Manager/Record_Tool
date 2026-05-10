@@ -4,7 +4,7 @@ Behavior User Collecting is a desktop-plus-browser data collection project.
 
 It includes:
 
-- a Windows desktop application that controls the collection session
+- a desktop application that controls the collection session on Windows or Linux
 - a Chromium browser extension that sends browser activity to the desktop application
 - a Python analysis pipeline that turns sessions into features and temporal graphs
 
@@ -12,23 +12,41 @@ The main project code lives in [cognitive_system/](cognitive_system/README.md).
 
 ## Intended Platform
 
-This repository is designed for local use on a Windows machine.
+This repository is designed for local use on Windows and Linux desktops.
 
 Recommended prerequisites:
 
-- Windows 10 or 11
+- Windows 10/11 or a Linux desktop session
 - Python 3.10+
-- Google Chrome or Microsoft Edge
+- Google Chrome, Chromium, Brave, Opera, Vivaldi, or Microsoft Edge for the extension
+
+Linux notes:
+
+- install `python3-venv` and `python3-tk`
+- for OS foreground-app tracking on X11, install `x11-utils` (`xprop`) or `xdotool`
+- for Linux notification capture, install `dbus-monitor` (`dbus-x11` or your distro's DBus tools package)
+- on Wayland, browser pause/resume still works through the extension; non-browser foreground app names may be `unknown` unless your compositor exposes XWayland metadata
 
 ## Installation
 
 From the repository root:
+
+Windows:
 
 ```powershell
 cd .\cognitive_system
 python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
 .\.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+Linux:
+
+```bash
+cd cognitive_system
+python3 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements.txt
 ```
 
 ## Configuration
@@ -62,6 +80,12 @@ From `cognitive_system/`, start the desktop launcher with:
 .\.venv\Scripts\python -m system_agent
 ```
 
+On Linux:
+
+```bash
+./.venv/bin/python -m system_agent
+```
+
 This opens the desktop launcher, where the user can choose:
 
 - mode (`experimental` or `production`)
@@ -91,7 +115,7 @@ Useful notes:
 
 ## Load The Extension
 
-In Chrome:
+In Chrome or Chromium:
 
 1. Open `chrome://extensions`
 2. Enable `Developer mode`
@@ -117,7 +141,7 @@ Recommended order for a new user:
 
 1. Install the Python dependencies.
 2. Launch the desktop application.
-3. Load the extension in Chrome or Edge.
+3. Load the extension in Chrome, Chromium, Brave, Opera, Vivaldi, or Edge.
 4. Return to the launcher window and start the session.
 
 During the session:
@@ -153,10 +177,23 @@ cd .\cognitive_system
 .\.venv\Scripts\python -m feature_engineering.pipeline <session_id> --graph-node-level app
 ```
 
+Linux uses the same module path:
+
+```bash
+cd cognitive_system
+./.venv/bin/python -m feature_engineering.pipeline <session_id> --graph-node-level app
+```
+
 To open the graph viewer:
 
 ```powershell
 .\.venv\Scripts\python -m feature_engineering.graph_viewer --session-id <session_id> --window-label 30s
+```
+
+Linux:
+
+```bash
+./.venv/bin/python -m feature_engineering.graph_viewer --session-id <session_id> --window-label 30s
 ```
 
 ## Repository Layout

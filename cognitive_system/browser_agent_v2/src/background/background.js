@@ -155,6 +155,8 @@ function applyInactiveState() {
 }
 
 function handleSystemMessage(msg) {
+  const previousSessionId = sessionStatus.session_id;
+
   switch (msg.type) {
     case MSG.START_RECORDING:
       mergeSessionStatus({
@@ -209,6 +211,10 @@ function handleSystemMessage(msg) {
 
   persistState();
   notifyPopup();
+
+  if (!previousSessionId && sessionStatus.session_id) {
+    emitBrowserFocusSnapshot("session_started").catch(() => {});
+  }
 }
 
 function enqueueEvent(event, options = {}) {
@@ -235,6 +241,40 @@ function flushEvents() {
   });
   if (!ok) {
     eventBuffer = batch.concat(eventBuffer);
+  }
+}
+
+function emitBrowserFocusEvent(focused, tab = null, reason = "window_focus") {
+  if (!sessionStatus.session_id) return;
+  enqueueEvent(
+    {
+      event_type: focused ? EVENT_TYPE.BROWSER_FOCUS : EVENT_TYPE.BROWSER_BLUR,
+      tab_id: tab?.id != null ? String(tab.id) : "",
+      url: tab?.url || "",
+      title: tab?.title || "",
+      window_id: tab?.windowId != null ? String(tab.windowId) : "",
+      extra: reason,
+    },
+    { force: true }
+  );
+  flushEvents();
+}
+
+async function emitBrowserFocusSnapshot(reason = "focus_snapshot") {
+  if (!sessionStatus.session_id) return;
+  try {
+    const focusedWindow = await chrome.windows.getLastFocused({
+      populate: true,
+      windowTypes: ["normal"],
+    });
+    if (!focusedWindow || focusedWindow.focused === false) {
+      emitBrowserFocusEvent(false, null, reason);
+      return;
+    }
+    const activeTab = (focusedWindow.tabs || []).find((tab) => tab.active) || null;
+    emitBrowserFocusEvent(true, activeTab, reason);
+  } catch (_) {
+    emitBrowserFocusEvent(false, null, reason);
   }
 }
 
@@ -355,6 +395,14 @@ chrome.idle.onStateChanged.addListener((state) => {
   }
 });
 
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    emitBrowserFocusEvent(false, null, "window_blur");
+    return;
+  }
+  emitBrowserFocusSnapshot("window_focus").catch(() => {});
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "scroll_event") {
     enqueueEvent({
@@ -455,4 +503,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   await restoreState();
   notifyPopup();
   connectWS();
+  if (sessionStatus.session_id) {
+    emitBrowserFocusSnapshot("service_worker_start").catch(() => {});
+  }
 })();

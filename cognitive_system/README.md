@@ -8,6 +8,7 @@
   - Python orchestrator running on the desktop
   - Owns session timing, active-app tracking, CSV writing, and runtime coordination
   - Collects app/context events, keyboard, mouse, notification, system metrics, and dual-task results
+  - Supports Windows and Linux foreground-app tracking; Linux uses X11 metadata when available and browser-extension focus events as a cross-platform browser fallback
   - Supports regular or random dual-task probe timing, with randomized screen position by default
 
 - `browser_agent_v2/`
@@ -101,6 +102,12 @@ Run:
 .\.venv\Scripts\python -m feature_engineering.graph_viewer --session-id <session_id> --window-label 30s
 ```
 
+Linux:
+
+```bash
+./.venv/bin/python -m feature_engineering.graph_viewer --session-id <session_id> --window-label 30s
+```
+
 Current viewer behavior:
 
 - shows one session at a time
@@ -113,15 +120,31 @@ Current viewer behavior:
 
 Recommended install path:
 
+Windows:
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
+Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Linux desktop packages normally needed:
+
+- `python3-tk` for the launcher, overlay, questionnaire, and dual-task probe
+- `x11-utils` (`xprop`) or `xdotool` for X11 foreground-app names
+- `dbus-monitor` for Linux notification capture
+
 `requirements.txt` includes both runtime and analysis dependencies. `setup.py` is still available as a quick helper, but it installs only the `system_agent` requirements.
 
-After dependencies are installed on Windows, users can also start the desktop launcher by double-clicking `run_collector.pyw`.
+After dependencies are installed on Windows, users can also start the desktop launcher by double-clicking `run_collector.pyw`. On Linux, start it with `python -m system_agent` from this directory.
 
 ## See Also
 

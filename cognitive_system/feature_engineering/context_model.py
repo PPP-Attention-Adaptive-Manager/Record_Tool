@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,22 +13,39 @@ import pandas as pd
 INTERNAL_PROCESS_NAMES = frozenset(
     {
         "dual_task.exe",
+        "dual_task",
         "behavior_collector.exe",
+        "behavior_collector",
     }
 )
-PYTHON_PROCESS_NAME = "python.exe"
+PYTHON_PROCESS_NAMES = frozenset({"python.exe", "python", "python3"})
 DUAL_TASK_TITLE_TOKENS = ("dual task", "dual_task")
 
 BROWSER_PROCESS_NAMES = frozenset(
     {
         "chrome.exe",
+        "chrome",
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
         "msedge.exe",
+        "msedge",
+        "microsoft-edge",
+        "microsoft-edge-stable",
         "edge.exe",
         "firefox.exe",
+        "firefox",
         "brave.exe",
+        "brave",
+        "brave-browser",
         "bravebrowser.exe",
         "opera.exe",
+        "opera",
         "vivaldi.exe",
+        "vivaldi",
+        "vivaldi-bin",
+        "browser",
     }
 )
 
@@ -39,6 +56,7 @@ BROWSER_TITLE_SUFFIXES = (
     " - Brave",
     " - Opera",
     " - Vivaldi",
+    " - Chromium",
 )
 
 
@@ -47,7 +65,7 @@ def normalize_process_name(value: Any) -> str:
     if not text:
         return ""
     try:
-        return PureWindowsPath(text).name.lower()
+        return PurePosixPath(PureWindowsPath(text).name).name.lower()
     except Exception:
         return text
 
@@ -60,7 +78,7 @@ def is_internal_context(app_name: Any, window_title: Any = "", title: Any = "") 
     process_name = normalize_process_name(app_name)
     if process_name in INTERNAL_PROCESS_NAMES:
         return True
-    if process_name != PYTHON_PROCESS_NAME:
+    if process_name not in PYTHON_PROCESS_NAMES:
         return False
     title_text = f"{window_title or ''} {title or ''}".strip().lower()
     return any(token in title_text for token in DUAL_TASK_TITLE_TOKENS)

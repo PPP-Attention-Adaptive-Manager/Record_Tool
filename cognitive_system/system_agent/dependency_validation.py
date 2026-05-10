@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
+import platform
+import shutil
 
 from .config import RuntimeConfig
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _module_available(module_name: str) -> bool:
@@ -11,6 +16,7 @@ def _module_available(module_name: str) -> bool:
 
 def validate_runtime_dependencies(config: RuntimeConfig) -> None:
     missing: list[str] = []
+    system_name = platform.system().lower()
 
     if not _module_available("websockets"):
         missing.append(
@@ -40,6 +46,18 @@ def validate_runtime_dependencies(config: RuntimeConfig) -> None:
             "`psutil` is required for active-application foreground detection. "
             "Install with: `pip install psutil`."
         )
+
+    if system_name == "linux":
+        if not (shutil.which("xprop") or shutil.which("xdotool")):
+            LOGGER.warning(
+                "Linux foreground-app names need `xprop` (x11-utils) or `xdotool`; "
+                "browser focus pause/resume still works through the extension."
+            )
+        if config.notification_tracking_enabled and not shutil.which("dbus-monitor"):
+            LOGGER.warning(
+                "Linux notification tracking needs `dbus-monitor`; install your "
+                "distribution's DBus tools package or disable notification tracking."
+            )
 
     if missing:
         details = "\n".join(f"- {item}" for item in missing)

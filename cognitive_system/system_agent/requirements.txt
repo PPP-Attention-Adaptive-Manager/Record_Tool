@@ -3,4 +3,5 @@ aiohttp>=3.9.0
 pynput>=1.7.6
 influxdb-client>=1.43.0
 psutil>=6.0.0
-pywinauto>=0.6.8
+pywinauto>=0.6.8; platform_system == "Windows"
+winsdk>=1.0.0b10; platform_system == "Windows"

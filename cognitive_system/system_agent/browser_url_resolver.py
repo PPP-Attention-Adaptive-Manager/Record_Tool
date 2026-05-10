@@ -3,7 +3,8 @@
 This is a system-agent fallback for sessions where the browser extension is not
 connected. It reads the active browser address bar without focusing it or
 sending keystrokes. If UI Automation or the optional dependency is unavailable,
-callers simply receive an empty URL.
+callers simply receive an empty URL. Linux browser URLs are supplied by the
+browser extension focus/navigation events instead of OS address-bar scraping.
 """
 
 from __future__ import annotations
