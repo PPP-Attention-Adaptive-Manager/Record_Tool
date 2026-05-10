@@ -46,26 +46,35 @@ h2:first-child {
 
 .field {
   display: grid;
-  grid-template-columns: 1fr 42px;
-  align-items: center;
-  gap: 6px 12px;
+  gap: 6px;
   margin: 14px 0 18px;
   padding-bottom: 12px;
   border-bottom: 1px solid #edf3f8;
 }
 
 .field label {
-  grid-column: 1 / -1;
   font-size: 14px;
   font-weight: 700;
 }
 
 .field-help {
-  grid-column: 1 / -1;
   margin: 0 0 4px;
   color: #5f7285;
   font-size: 13px;
   line-height: 1.4;
+}
+
+.scale-row {
+  display: grid;
+  grid-template-columns: 28px minmax(120px, 1fr) 38px 42px;
+  align-items: center;
+  gap: 8px;
+}
+
+.scale-bound {
+  color: #607188;
+  font-size: 13px;
+  text-align: center;
 }
 
 .text-field {
@@ -135,9 +144,8 @@ button[type="submit"]:disabled {
 }
 
 @media (max-width: 680px) {
-  .field {
-    grid-template-columns: 1fr 42px;
-    gap: 6px;
+  .scale-row {
+    grid-template-columns: 24px minmax(0, 1fr) 34px 38px;
   }
 
   .field output {

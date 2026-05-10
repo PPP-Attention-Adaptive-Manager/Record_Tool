@@ -9,7 +9,7 @@
 <body>
   <main class="container">
     <header>
-      <h1>Post-Session Questionnaire</h1>
+      <h1>Session Questionnaire</h1>
       <p id="session-id">Session: -</p>
     </header>
 
@@ -17,84 +17,118 @@
       <h2>Task Context</h2>
 
       <div class="text-field">
-        <label for="task_description">Task Description</label>
+        <label for="task_description">Task description</label>
+        <p class="field-help">Briefly describe what you were doing during this session.</p>
         <textarea
           id="task_description"
           name="task_description"
           rows="4"
           maxlength="2000"
-          placeholder="Briefly describe what you were doing during this session."
         ></textarea>
       </div>
 
-      <h2>NASA-TLX (Raw)</h2>
+      <h2>Session Ratings</h2>
 
       <div class="field">
-        <label for="mental_demand">Mental Demand (0-100)</label>
-        <p class="field-help">What level of mental effort was required? Thinking, concentration, and understanding tasks.</p>
-        <input id="mental_demand" name="mental_demand" type="range" min="0" max="100" value="50" />
-        <output id="out_mental_demand">50</output>
+        <label for="mental_demand">Mental demand</label>
+        <p class="field-help">How mentally demanding was the session?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="mental_demand" name="mental_demand" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_mental_demand">50</output>
+        </div>
       </div>
 
       <div class="field">
-        <label for="physical_demand">Physical Demand (0-100)</label>
-        <p class="field-help">How physically demanding was the interaction? Mouse movement, keyboard effort, and physical interaction load.</p>
-        <input id="physical_demand" name="physical_demand" type="range" min="0" max="100" value="50" />
-        <output id="out_physical_demand">50</output>
+        <label for="physical_demand">Physical demand</label>
+        <p class="field-help">How physically demanding was the session?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="physical_demand" name="physical_demand" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_physical_demand">50</output>
+        </div>
       </div>
 
       <div class="field">
-        <label for="temporal_demand">Temporal Demand (0-100)</label>
+        <label for="temporal_demand">Temporal demand</label>
         <p class="field-help">How time-pressured or rushed did you feel during the session?</p>
-        <input id="temporal_demand" name="temporal_demand" type="range" min="0" max="100" value="50" />
-        <output id="out_temporal_demand">50</output>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="temporal_demand" name="temporal_demand" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_temporal_demand">50</output>
+        </div>
       </div>
 
       <div class="field">
-        <label for="performance">Performance (0-100)</label>
-        <p class="field-help">How successful do you think you were in completing your tasks? 0 means failure, 100 means perfect.</p>
-        <input id="performance" name="performance" type="range" min="0" max="100" value="50" />
-        <output id="out_performance">50</output>
+        <label for="performance">Performance</label>
+        <p class="field-help">How satisfied are you with your performance?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="performance" name="performance" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_performance">50</output>
+        </div>
       </div>
 
       <div class="field">
-        <label for="effort">Effort (0-100)</label>
-        <p class="field-help">How hard did you have to work, mentally and physically combined, to achieve your level of performance?</p>
-        <input id="effort" name="effort" type="range" min="0" max="100" value="50" />
-        <output id="out_effort">50</output>
+        <label for="effort">Effort</label>
+        <p class="field-help">How hard did you have to work overall?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="effort" name="effort" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_effort">50</output>
+        </div>
       </div>
 
       <div class="field">
-        <label for="frustration">Frustration (0-100)</label>
-        <p class="field-help">How stressed, irritated, or annoyed did you feel? 0 means calm, 100 means very frustrated.</p>
-        <input id="frustration" name="frustration" type="range" min="0" max="100" value="50" />
-        <output id="out_frustration">50</output>
-      </div>
-
-      <h2>Affective Ratings</h2>
-
-      <div class="field">
-        <label for="stress_self_report">Stress Self-Report (0-100)</label>
-        <p class="field-help">Overall perceived stress during the session. 0 means completely calm, 100 means very stressed.</p>
-        <input id="stress_self_report" name="stress_self_report" type="range" min="0" max="100" value="50" />
-        <output id="out_stress_self_report">50</output>
+        <label for="frustration">Frustration</label>
+        <p class="field-help">How insecure, discouraged, or annoyed did you feel?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="frustration" name="frustration" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_frustration">50</output>
+        </div>
       </div>
 
       <div class="field">
-        <label for="valence">Valence (1-9)</label>
-        <p class="field-help">How positive or negative was your emotional state? 1 means very negative or unpleasant, 5 neutral, 9 very positive or pleasant.</p>
-        <input id="valence" name="valence" type="range" min="1" max="9" value="5" />
-        <output id="out_valence">5</output>
+        <label for="stress_self_report">Stress</label>
+        <p class="field-help">How stressed did you feel during the session?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="stress_self_report" name="stress_self_report" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_stress_self_report">50</output>
+        </div>
       </div>
 
       <div class="field">
-        <label for="arousal">Arousal (1-9)</label>
-        <p class="field-help">How calm or excited did you feel? 1 means very calm or relaxed, 5 moderate, 9 highly excited or stimulated.</p>
-        <input id="arousal" name="arousal" type="range" min="1" max="9" value="5" />
-        <output id="out_arousal">5</output>
+        <label for="valence">Valence</label>
+        <p class="field-help">How positive or pleasant did you feel?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="valence" name="valence" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_valence">50</output>
+        </div>
       </div>
 
-      <button id="submit" type="submit">Submit Questionnaire</button>
+      <div class="field">
+        <label for="arousal">Arousal</label>
+        <p class="field-help">How activated or alert did you feel?</p>
+        <div class="scale-row">
+          <span class="scale-bound">0</span>
+          <input id="arousal" name="arousal" type="range" min="0" max="100" value="50" />
+          <span class="scale-bound">100</span>
+          <output id="out_arousal">50</output>
+        </div>
+      </div>
+
+      <button id="submit" type="submit">Submit</button>
     </form>
 
     <section id="done" class="hidden">
