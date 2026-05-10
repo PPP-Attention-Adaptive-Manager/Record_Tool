@@ -53,4 +53,3 @@ form.addEventListener("submit", async (event) => {
   form.classList.add("hidden");
   donePanel.classList.remove("hidden");
 });
-
