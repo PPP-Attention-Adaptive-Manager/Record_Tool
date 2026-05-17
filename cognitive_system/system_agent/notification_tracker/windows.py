@@ -1,59 +1,72 @@
+"""Windows notification tracker backend using winsdk."""
+
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
+import platform
 import sqlite3
 import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from .base import NotificationTrackerBackend
+
 LOGGER = logging.getLogger(__name__)
 
 _NOTIF_MODULE_DIR = (
-    Path(__file__).resolve().parent
+    Path(__file__).resolve().parent.parent
     / "Notification_collection"
     / "notif-module"
 )
 
-# HRESULT E_NOTIMPL (0x80004001) — returned when the API requires a packaged
-# Windows app identity (UWP / MSIX), which a plain Python process lacks.
 _E_NOTIMPL_STR = "-2147467263"
 
 
-class NotificationTracker:
-    """Drives the existing Notification_collection/notif-module listener.
-
-    Calls poll_notifications() from the existing listener module (which
-    maintains the SQLite log) and additionally emits each new DB row as an
-    event dict via the on_event callback so it can reach CSV / InfluxDB.
-
-    If the Windows notification API returns E_NOTIMPL (requires packaged-app
-    identity), the tracker disables itself after the first failed poll and
-    logs a single clear warning instead of spamming the console.
-    """
+class WindowsNotificationBackend(NotificationTrackerBackend):
+    """Notification tracking via Windows UserNotificationListener (winsdk)."""
 
     POLL_INTERVAL = 2.0
 
-    def __init__(self, on_event: Callable[[dict], None], enabled: bool = True):
-        self._on_event = on_event
-        self._enabled = enabled
+    @classmethod
+    def backend_name(cls) -> str:
+        return "windows"
+
+    @classmethod
+    def is_candidate(cls) -> bool:
+        return platform.system().lower() == "windows"
+
+    @classmethod
+    def probe(cls) -> tuple[bool, str]:
+        if not cls.is_candidate():
+            return False, "Not a Windows platform"
+        try:
+            from winsdk.windows.ui.notifications.management import (  # noqa: F401
+                UserNotificationListener,
+            )
+            return True, "winsdk available"
+        except ImportError:
+            return False, "winsdk not installed"
+        except Exception as exc:
+            return False, f"winsdk error: {exc}"
+
+    def __init__(self) -> None:
+        self._on_event: Optional[Callable[[dict], None]] = None
         self._task: Optional[asyncio.Task] = None
         self._last_row_id = 0
 
-    def start(self) -> None:
-        """Call from within a running asyncio event loop."""
-        if not self._enabled:
-            return
-        self._task = asyncio.create_task(self._run(), name="notification-tracker")
-        LOGGER.info("Notification tracker started")
+    def start(self, on_event: Callable[[dict], None]) -> None:
+        self._on_event = on_event
+        self._task = asyncio.create_task(self._run(), name="notification-tracker-windows")
+        LOGGER.info("Windows notification tracker started")
 
     def stop(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
         self._task = None
-        LOGGER.info("Notification tracker stopped")
+        LOGGER.info("Windows notification tracker stopped")
 
     async def _run(self) -> None:
         notif_dir = str(_NOTIF_MODULE_DIR)
@@ -66,8 +79,6 @@ class NotificationTracker:
             LOGGER.warning("Could not import notification listener module: %s", exc)
             return
 
-        # Point the module's global db_conn at an absolute path so it works
-        # regardless of the process working directory.
         db_path = _NOTIF_MODULE_DIR / "data" / "notif_log.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), check_same_thread=False)
@@ -86,13 +97,12 @@ class NotificationTracker:
             """
         )
         conn.commit()
-        notif_listener.db_conn = conn  # inject into the module's global
+        notif_listener.db_conn = conn
 
         try:
-            from winsdk.windows.ui.notifications.management import (  # type: ignore[import]
+            from winsdk.windows.ui.notifications.management import (
                 UserNotificationListener,
             )
-
             access = await UserNotificationListener.current.request_access_async()
             LOGGER.info("NotificationListener access: %s", access)
         except ImportError:
@@ -102,10 +112,6 @@ class NotificationTracker:
             LOGGER.warning("Could not get notification access: %s", exc)
             return
 
-        # Poll loop.
-        # poll_notifications() swallows its own exceptions via `print(error)`.
-        # We capture stdout so we can detect E_NOTIMPL from that print output
-        # and stop cleanly on the first failure instead of looping forever.
         while True:
             captured = io.StringIO()
             old_stdout = sys.stdout
@@ -115,24 +121,24 @@ class NotificationTracker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # Rare: exception escaped poll_notifications() — handle it too.
                 if _E_NOTIMPL_STR in str(exc):
-                    _log_not_impl()
+                    self._log_not_impl()
                     return
                 LOGGER.warning("Notification poll error: %s", exc)
             finally:
-                sys.stdout = old_stdout  # always restore, even on exception
+                sys.stdout = old_stdout
 
             output = captured.getvalue()
             if _E_NOTIMPL_STR in output:
-                _log_not_impl()
+                self._log_not_impl()
                 return
 
             self._emit_new_rows(conn)
             await asyncio.sleep(self.POLL_INTERVAL)
 
     def _emit_new_rows(self, conn: sqlite3.Connection) -> None:
-        """Query the SQLite log for rows added since the last call and emit them."""
+        if self._on_event is None:
+            return
         try:
             cursor = conn.execute(
                 """
@@ -161,10 +167,10 @@ class NotificationTracker:
         except Exception as exc:
             LOGGER.warning("Could not emit notification rows: %s", exc)
 
-
-def _log_not_impl() -> None:
-    LOGGER.warning(
-        "Windows notification API returned E_NOTIMPL — this API requires a "
-        "packaged/registered Windows app identity (MSIX/UWP). "
-        "Notification tracking is disabled for this session."
-    )
+    @staticmethod
+    def _log_not_impl() -> None:
+        LOGGER.warning(
+            "Windows notification API returned E_NOTIMPL — this API requires a "
+            "packaged/registered Windows app identity (MSIX/UWP). "
+            "Notification tracking is disabled for this session."
+        )

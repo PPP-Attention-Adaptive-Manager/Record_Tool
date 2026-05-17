@@ -2,8 +2,12 @@ websockets>=12.0
 aiohttp>=3.9.0
 pynput>=1.7.6
 psutil>=6.0.0
-pywinauto>=0.6.8
 influxdb-client>=1.43.0
+
+# Platform-specific
+pywinauto>=0.6.8        ; sys_platform == 'win32'
+python-xlib>=0.33       ; sys_platform == 'linux'
+dbus-next>=0.2.3         ; sys_platform == 'linux'
 
 # Feature engineering pipeline
 pandas>=2.0.0

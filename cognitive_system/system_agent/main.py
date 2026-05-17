@@ -24,7 +24,8 @@ LOGGER = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from system_agent.app_tracker import AppSnapshot, AppTracker
+from system_agent.app_tracker import AppSnapshot, AppTracker, create_app_tracker_backend
+from system_agent.app_tracker.factory import probe_all_backends
 from system_agent.config import DUAL_TASK_INTERVAL_RANDOM, RuntimeConfig, build_runtime_config
 from system_agent.context_tracker import ContextFrame, ContextTracker
 from system_agent.data_writer import DataWriter
@@ -33,7 +34,7 @@ from system_agent.dual_task_manager import DualTaskManager
 from system_agent.extension_server import ExtensionServer
 from system_agent.keyboard_tracker import KeyboardTracker
 from system_agent.mouse_tracker import MouseTracker
-from system_agent.notification_tracker import NotificationTracker
+from system_agent.notification_tracker import create_notification_backend
 from system_agent.questionnaire_app import DesktopQuestionnaireApp
 from system_agent.session_manager import SessionManager
 from system_agent.system_metrics import SystemMetricsCollector
@@ -96,16 +97,17 @@ class CognitiveSystemAgent:
             enabled=config.mouse_tracking_enabled,
             context_provider=self._context_tracker.get_current_context,
         )
+        preferred_backend = os.environ.get("APP_TRACKER_BACKEND")
+        backend = create_app_tracker_backend(preferred=preferred_backend or None)
+        LOGGER.info("App tracker backend: %s", backend.backend_name())
         self.app_tracker = AppTracker(
+            backend=backend,
             poll_interval_sec=config.app_poll_interval_seconds,
             browser_processes=set(config.browser_processes),
             on_change=self._on_active_app_change,
         )
 
-        self._notification_tracker = NotificationTracker(
-            on_event=self._handle_notification_event,
-            enabled=config.notification_tracking_enabled,
-        )
+        self._notification_tracker = create_notification_backend()
         self._system_metrics = SystemMetricsCollector(
             on_event=self._handle_system_metrics_event,
             enabled=config.system_metrics_enabled,
@@ -384,7 +386,7 @@ class CognitiveSystemAgent:
 
         self.keyboard_tracker.start()
         self.mouse_tracker.start()
-        self._notification_tracker.start()
+        self._notification_tracker.start(on_event=self._handle_notification_event)
         self._system_metrics.start()
         if self._ui_overlay:
             self._ui_overlay.start(on_stop_requested=self._on_overlay_stop_requested)

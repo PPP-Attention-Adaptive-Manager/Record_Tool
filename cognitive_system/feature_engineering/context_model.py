@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import PureWindowsPath
+import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,6 +21,7 @@ DUAL_TASK_TITLE_TOKENS = ("dual task", "dual_task")
 
 BROWSER_PROCESS_NAMES = frozenset(
     {
+        # Windows
         "chrome.exe",
         "msedge.exe",
         "edge.exe",
@@ -29,6 +30,22 @@ BROWSER_PROCESS_NAMES = frozenset(
         "bravebrowser.exe",
         "opera.exe",
         "vivaldi.exe",
+        # Linux
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "ungoogled-chromium",
+        "firefox",
+        "firefox-esr",
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        "brave-browser",
+        "brave",
+        "opera",
+        "opera-stable",
+        "vivaldi",
+        "vivaldi-snapshot",
     }
 )
 
@@ -46,10 +63,7 @@ def normalize_process_name(value: Any) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return ""
-    try:
-        return PureWindowsPath(text).name.lower()
-    except Exception:
-        return text
+    return os.path.basename(text)
 
 
 def is_internal_app(app_name: Any) -> bool:
