@@ -32,6 +32,8 @@ class LinuxUrlResolverStub(BrowserUrlResolverBackend):
 
     @classmethod
     def probe(cls) -> tuple[bool, str]:
+        if not cls.is_candidate():
+            return False, "Not a Linux platform"
         return True, "stub — URLs come from browser extension"
 
     def __init__(self) -> None:

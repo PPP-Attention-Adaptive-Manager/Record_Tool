@@ -15,6 +15,7 @@ except ImportError:
 from ctypes import wintypes
 
 from shared.time_utils import now_ns
+from system_agent.browser_url_resolver import create_url_resolver_backend
 
 from .base import AppSnapshot, AppTrackerBackend, ProbeResult
 
@@ -23,6 +24,9 @@ LOGGER = logging.getLogger(__name__)
 
 class WindowsAppBackend(AppTrackerBackend):
     """Foreground window detection via Win32 user32.dll."""
+
+    def __init__(self) -> None:
+        self._url_resolver = create_url_resolver_backend()
 
     @classmethod
     def backend_name(cls) -> str:
@@ -94,6 +98,7 @@ class WindowsAppBackend(AppTrackerBackend):
                 process_name = "unknown"
 
         is_browser = process_name in browser_processes
+        url = self._url_resolver.resolve(int(hwnd), process_name) if is_browser else ""
 
         return AppSnapshot(
             timestamp_ns=now_ns(),
@@ -101,4 +106,5 @@ class WindowsAppBackend(AppTrackerBackend):
             window_title=window_title or "",
             pid=proc_pid,
             is_browser=is_browser,
+            url=url,
         )
