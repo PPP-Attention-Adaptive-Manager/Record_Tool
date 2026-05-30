@@ -12,13 +12,23 @@ The main project code lives in [cognitive_system/](cognitive_system/README.md).
 
 ## Intended Platform
 
-This repository is designed for local use on a Windows machine.
+This repository is designed primarily for Windows, with experimental Linux support.
 
 Recommended prerequisites:
 
 - Windows 10 or 11
 - Python 3.10+
 - Google Chrome or Microsoft Edge
+## Linux Support (Experimental)
+
+Linux support is partially implemented and validated on X11-based environments (e.g., XFCE, Mint, Kali Linux).
+
+Wayland support (GNOME, KDE, Sway, Hyprland) is implemented using best-effort adapters and may require additional compositor-specific configuration or extensions.
+
+Important limitations:
+- Browser URL tracking on Linux requires the Chromium browser extension
+- Without the extension, URL resolution will not work (no reliable fallback exists on Linux)
+- Some Wayland backends depend on external compositor APIs or scripts
 
 ## Installation
 
@@ -29,6 +39,21 @@ cd .\cognitive_system
 python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
 .\.venv\Scripts\python -m pip install -r requirements.txt
+```
+Linux users:
+
+- The desktop application is fully functional on X11 environments
+- Browser extension is required for URL tracking
+- Some Wayland environments may require compositor-specific setup
+- From the repository root:
+
+```bash
+cd ./cognitive_system
+python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 ## Configuration
@@ -126,6 +151,12 @@ During the session:
 - the extension sends browser events to the application
 - a questionnaire may open at the end of the session if that option is enabled
 
+Linux users:
+
+- The desktop application is fully functional on X11 environments
+- Browser extension is required for URL tracking
+- Some Wayland environments may require compositor-specific setup
+
 ## Data Output
 
 Raw files are written to:
@@ -182,3 +213,8 @@ Behavior User Collecting/
 - Technical overview: [cognitive_system/README.md](cognitive_system/README.md)
 - Step-by-step run guide: [cognitive_system/HOW_TO_RUN.md](cognitive_system/HOW_TO_RUN.md)
 - Full architecture: [Architecture.md](Architecture.md)
+## Acknowledgements
+
+
+Special thanks to [@ahkinsat](https://github.com/ahkinsat) for the significant contribution to the Linux MVP implementation, including the cross-platform refactor and initial support for X11-based environments. The work also laid the foundation for experimental Wayland support across GNOME, KDE, Sway, and Hyprland.
+

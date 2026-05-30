@@ -1,10 +1,4 @@
-"""Best-effort active browser URL capture via Windows UI Automation.
-
-This is a system-agent fallback for sessions where the browser extension is not
-connected. It reads the active browser address bar without focusing it or
-sending keystrokes. If UI Automation or the optional dependency is unavailable,
-callers simply receive an empty URL.
-"""
+"""Windows browser URL resolver via pywinauto UI Automation."""
 
 from __future__ import annotations
 
@@ -12,6 +6,8 @@ import logging
 import platform
 import re
 from typing import Any
+
+from .base import BrowserUrlResolverBackend
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,16 +30,35 @@ _PLACEHOLDER_TOKENS = (
 )
 
 
-class BrowserUrlResolver:
-    """Resolve the URL of the foreground browser window when possible."""
+class WindowsUrlResolverBackend(BrowserUrlResolverBackend):
+    """Resolve browser URL via pywinauto UI Automation."""
+
+    @classmethod
+    def backend_name(cls) -> str:
+        return "windows"
+
+    @classmethod
+    def is_candidate(cls) -> bool:
+        return platform.system().lower() == "windows"
+
+    @classmethod
+    def probe(cls) -> tuple[bool, str]:
+        if not cls.is_candidate():
+            return False, "Not a Windows platform"
+        try:
+            from pywinauto import Desktop  # noqa: F401
+            return True, "pywinauto available"
+        except ImportError:
+            return False, "pywinauto not installed"
+        except Exception as exc:
+            return False, f"pywinauto error: {exc}"
 
     def __init__(self) -> None:
-        self._is_windows = platform.system().lower() == "windows"
         self._missing_dependency_logged = False
         self._last_error: str | None = None
 
     def resolve(self, hwnd: int, process_name: str) -> str:
-        if not self._is_windows or not hwnd:
+        if not hwnd:
             return ""
 
         try:

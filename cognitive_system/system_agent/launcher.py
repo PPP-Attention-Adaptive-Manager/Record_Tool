@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from typing import Optional
 
+from .capability_probe import CapabilityStatus, SystemCapabilityProbe
 from .config import (
     DUAL_TASK_INTERVAL_RANDOM,
     DUAL_TASK_INTERVAL_REGULAR,
@@ -25,8 +27,13 @@ class LaunchDecision:
 class StartupLauncher:
     """Small default-config confirmation window for production-style launch."""
 
-    def __init__(self, config: RuntimeConfig) -> None:
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        capabilities: Optional[list[CapabilityStatus]] = None,
+    ) -> None:
         self.config = config
+        self.capabilities = capabilities or []
         self._decision = LaunchDecision(confirmed=False)
 
     def show(self) -> RuntimeConfig | None:
@@ -68,8 +75,76 @@ class StartupLauncher:
             font=("Segoe UI", 10),
         ).grid(row=1, column=0, sticky="w", pady=(6, 16))
 
-        card_shell = tk.Frame(shell, bg="#edf3fb")
-        card_shell.grid(row=2, column=0, sticky="nsew")
+        # ── System Status Card ──────────────────────────────────────────────
+        if self.capabilities:
+            status_frame = tk.Frame(shell, bg="#edf3fb")
+            status_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+
+            tk.Label(
+                status_frame,
+                text="System Status",
+                bg="#edf3fb",
+                fg="#203243",
+                font=("Segoe UI", 12, "bold"),
+            ).pack(anchor="w")
+
+            status_inner = tk.Frame(
+                status_frame,
+                bg="#ffffff",
+                padx=14,
+                pady=10,
+                highlightbackground="#d5deea",
+                highlightthickness=1,
+            )
+            status_inner.pack(fill="x", pady=(4, 0))
+
+            for cap in self.capabilities:
+                row = tk.Frame(status_inner, bg="#ffffff")
+                row.pack(fill="x", pady=2)
+
+                icon = "\u2713" if cap.severity == "ok" else ("\u26a0" if cap.severity == "warning" else "\u2717")
+                color = "#2a8a3a" if cap.severity == "ok" else ("#b8860b" if cap.severity == "warning" else "#af4343")
+
+                tk.Label(
+                    row,
+                    text=icon,
+                    bg="#ffffff",
+                    fg=color,
+                    font=("Segoe UI", 11, "bold"),
+                    width=2,
+                    anchor="w",
+                ).pack(side="left")
+
+                tk.Label(
+                    row,
+                    text=f"{cap.feature}:  {cap.detail}",
+                    bg="#ffffff",
+                    fg="#31475d",
+                    font=("Segoe UI", 9),
+                    wraplength=620,
+                    justify="left",
+                ).pack(side="left", fill="x", expand=True)
+
+                if cap.guidance:
+                    guidance_label = tk.Label(
+                        status_inner,
+                        text=f"   \u2192 {cap.guidance}",
+                        bg="#ffffff",
+                        fg="#8a6d3b",
+                        font=("Segoe UI", 9, "italic"),
+                        wraplength=600,
+                        justify="left",
+                    )
+                    guidance_label.pack(anchor="w", pady=(0, 4))
+
+            # Adjust grid row for the config card
+            shell.grid_rowconfigure(3, weight=1)
+            card_shell = tk.Frame(shell, bg="#edf3fb")
+            card_shell.grid(row=3, column=0, sticky="nsew")
+        else:
+            shell.grid_rowconfigure(2, weight=1)
+            card_shell = tk.Frame(shell, bg="#edf3fb")
+            card_shell.grid(row=2, column=0, sticky="nsew")
         card_shell.grid_columnconfigure(0, weight=1)
         card_shell.grid_rowconfigure(0, weight=1)
 
@@ -324,8 +399,9 @@ class StartupLauncher:
         dual_interval_mode_var.trace_add("write", _sync_dual_task_controls)
         _apply_mode_rules()
 
+        note_row = 4 if self.capabilities else 3
         note = tk.Frame(shell, bg="#edf3fb", pady=14)
-        note.grid(row=3, column=0, sticky="ew")
+        note.grid(row=note_row, column=0, sticky="ew")
 
         tk.Label(
             note,
@@ -345,7 +421,7 @@ class StartupLauncher:
         ).pack(anchor="w", pady=(6, 0))
 
         buttons = tk.Frame(shell, bg="#edf3fb", pady=6)
-        buttons.grid(row=4, column=0, sticky="ew")
+        buttons.grid(row=note_row + 1, column=0, sticky="ew")
 
         def _cancel() -> None:
             self._decision.confirmed = False
@@ -503,7 +579,13 @@ def run_launcher() -> int:
         return 1
 
     try:
-        selected_config = StartupLauncher(config).show()
+        probe = SystemCapabilityProbe(config)
+        capabilities = probe.probe()
+    except Exception:
+        capabilities = []
+
+    try:
+        selected_config = StartupLauncher(config, capabilities).show()
         if selected_config is None:
             return 0
     except Exception as exc:

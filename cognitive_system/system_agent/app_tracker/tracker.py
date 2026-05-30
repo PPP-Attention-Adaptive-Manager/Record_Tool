@@ -1,23 +1,15 @@
-"""Active application tracking (OS-level)."""
+"""App tracker orchestrator — polls a backend and emits change notifications."""
 
 from __future__ import annotations
 
-import ctypes
 import logging
-import platform
 import threading
 import time
-from ctypes import wintypes
-from dataclasses import dataclass
 from typing import Callable, Optional, Set
 
-try:
-    import psutil
-except ImportError:  # handled by startup validation
-    psutil = None  # type: ignore[assignment]
-
 from shared.time_utils import now_ns
-from system_agent.browser_url_resolver import BrowserUrlResolver
+
+from .base import AppSnapshot, AppTrackerBackend
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,8 +29,8 @@ def _parse_app_context(process_name: str, window_title: str) -> str:
     if not title:
         return ""
     proc = process_name.lower()
-    # code.exe is VSCode; guard also covers titles that explicitly say "Visual Studio Code"
-    if proc == "code.exe" or ("code" in proc and "visual studio code" in title.lower()):
+    # code / code.exe is VSCode; guard also covers titles that explicitly say "Visual Studio Code"
+    if proc in ("code.exe", "code") or ("code" in proc and "visual studio code" in title.lower()):
         parts = [p.strip() for p in title.split(" - ")]
         # First segment is the open file; strip the unsaved-file marker (●)
         first = parts[0].lstrip("●").strip()
@@ -48,45 +40,26 @@ def _parse_app_context(process_name: str, window_title: str) -> str:
     return title
 
 
-@dataclass(frozen=True)
-class AppSnapshot:
-    timestamp_ns: int
-    process_name: str
-    window_title: str
-    pid: int | None
-    is_browser: bool
-    url: str = ""
-
-    @property
-    def app_name(self) -> str:
-        return self.process_name or "unknown"
-
-    @property
-    def context(self) -> str:
-        """Parsed, human-useful context extracted from the window title."""
-        return _parse_app_context(self.process_name, self.window_title)
-
-
 class AppTracker:
-    """Polls active OS window and emits change notifications."""
+    """Polls active OS window and emits change notifications.
+
+    Delegates platform-specific capture to an AppTrackerBackend instance.
+    """
 
     def __init__(
         self,
+        backend: AppTrackerBackend,
         poll_interval_sec: float,
         browser_processes: Set[str],
         on_change: Callable[[AppSnapshot], None],
     ) -> None:
+        self._backend = backend
         self._poll_interval_sec = poll_interval_sec
         self._browser_processes = {name.lower() for name in browser_processes}
         self._on_change = on_change
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_snapshot: Optional[AppSnapshot] = None
-        self._url_resolver = BrowserUrlResolver()
-
-        self._is_windows = platform.system().lower() == "windows"
-        if not self._is_windows:
-            LOGGER.warning("AppTracker currently supports Windows best; fallback will be 'unknown'.")
 
     @property
     def current_snapshot(self) -> Optional[AppSnapshot]:
@@ -103,6 +76,7 @@ class AppTracker:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=timeout_sec)
+        self._backend.cleanup()
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -139,57 +113,4 @@ class AppTracker:
         return True
 
     def _capture_snapshot(self) -> AppSnapshot:
-        if self._is_windows:
-            return self._capture_windows()
-        return AppSnapshot(
-            timestamp_ns=now_ns(),
-            process_name="unknown",
-            window_title="unsupported-platform",
-            pid=None,
-            is_browser=False,
-        )
-
-    def _capture_windows(self) -> AppSnapshot:
-        if psutil is None:
-            raise RuntimeError(
-                "AppTracker requires `psutil` for foreground process detection. "
-                "Install with `pip install psutil`."
-            )
-
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return AppSnapshot(
-                timestamp_ns=now_ns(),
-                process_name="unknown",
-                window_title="",
-                pid=None,
-                is_browser=False,
-            )
-
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-
-        title_buffer = ctypes.create_unicode_buffer(1024)
-        user32.GetWindowTextW(hwnd, title_buffer, 1024)
-        window_title = title_buffer.value
-
-        process_name = "unknown"
-        proc_pid = int(pid.value) if pid.value else None
-        if proc_pid:
-            try:
-                process_name = psutil.Process(proc_pid).name().lower()
-            except Exception:
-                process_name = "unknown"
-
-        is_browser = process_name in self._browser_processes
-        url = self._url_resolver.resolve(int(hwnd), process_name) if is_browser else ""
-
-        return AppSnapshot(
-            timestamp_ns=now_ns(),
-            process_name=process_name,
-            window_title=window_title,
-            pid=proc_pid,
-            is_browser=is_browser,
-            url=url,
-        )
+        return self._backend.capture_snapshot(self._browser_processes)
